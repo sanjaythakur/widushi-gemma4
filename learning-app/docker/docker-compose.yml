@@ -1,0 +1,40 @@
+# Compose file for local Mac development.
+#
+# Usage (from learning-app):
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# The container runs headless (SDL dummy drivers) so you don't need
+# X11 forwarding to bring it up. FastAPI is reachable on
+# http://localhost:8020. Use `curl -X POST localhost:8020/events
+# -H 'content-type: application/json' -d '{"type":"WAKE_DETECTED"}'`
+# to walk the FSM.
+#
+# For a Pi deploy, see docker/Dockerfile.app — you'll want
+# `--device /dev/fb0 --device /dev/snd` and SDL_VIDEODRIVER=fbcon
+# instead of dummy.
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: learning-app/docker/Dockerfile.app
+    image: widushi-app
+    container_name: widushi-app
+    ports:
+      - "8020:8020"
+    environment:
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+      WIDUSHI_API_HOST: "0.0.0.0"
+      WIDUSHI_API_PORT: "8020"
+      WIDUSHI_LOG: INFO
+      # Keep local headless compose independent of host microphone access.
+      WAKE_WORD_ENABLED: "0"
+      # Gemma reachable on the host. Override per-OS as needed.
+      GEMMA_URL: http://host.docker.internal:8010
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Live-mount the app for fast iteration. Comment out for prod.
+      - ../app:/app/app:ro
+    restart: unless-stopped

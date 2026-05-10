@@ -1,0 +1,67 @@
+# Gemma 4 26B A4B (Mixture-of-Experts; ~3.8B active parameters).
+#
+# The April 2026 Gemma 4 release ships this model as GGUF via Unsloth. Note
+# the unsloth repo does NOT publish a plain `Q4_K_M` quant for this MoE -
+# the smallest 4-bit K_M variant is the Unsloth Dynamic v2.0 build,
+# `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf`, which we use here.
+#
+# Per the model card, 26B A4B supports text + image only (no audio/video).
+# Requires ~16 GB RAM at UD-Q4_K_M; not recommended for Raspberry Pi 5.
+
+display_name: "Gemma 4 26B A4B (it)"
+short_name: "26B-A4B"
+
+hf_repo: "unsloth/gemma-4-26B-A4B-it-GGUF"
+hf_file: "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+mmproj_repo: "unsloth/gemma-4-26B-A4B-it-GGUF"
+mmproj_file: "mmproj-BF16.gguf"
+
+context_size: 16384
+threads: 8
+gpu_layers: 0
+
+modalities:
+  text: true
+  image: true
+  audio: false
+  video: false
+
+defaults:
+  max_tokens: 1024
+  temperature: 0.7
+  thinking: true
+
+prompts:
+  classify: |
+    You are a precise text classifier. Given the input text and the list of
+    candidate labels, choose {{ "one or more labels" if multi_label else "exactly one label" }}.
+    Respond ONLY with a JSON object of the form:
+      {"labels": ["label_a"{% if multi_label %}, "label_b"{% endif %}]}
+
+    Allowed labels: {{ labels | tojson }}
+
+    Text:
+    """
+    {{ text }}
+    """
+  extract: |
+    You are a structured-data extractor. Read the text below and produce a
+    single JSON object that exactly matches the requested schema. Use null for
+    any field that cannot be confidently extracted. Do NOT include any prose,
+    code fences, or commentary.
+
+    Schema:
+    {{ schema | tojson }}
+
+    Text:
+    """
+    {{ text }}
+    """
+  summarize: |
+    Summarize the following text{% if style %} in a {{ style }} style{% endif %}.
+    Be faithful, concise, and self-contained. Aim for {{ max_sentences }} sentences.
+
+    Text:
+    """
+    {{ text }}
+    """

@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.ruff_cache
+.git
+.gitignore
+phases
+readme
+pre-generated-clips/clips
+pre-generated-clips/models
+openwakeword

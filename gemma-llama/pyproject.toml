@@ -1,0 +1,12 @@
+# Minimal project metadata + tool configuration.
+# We intentionally keep packaging out of scope -- the service is shipped as a
+# Docker image, not a wheel.
+
+[tool.pytest.ini_options]
+testpaths = ["eval"]
+asyncio_mode = "auto"
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

@@ -1,0 +1,31 @@
+# Image for generating Widushi's pre-recorded ENGLISH clips with Piper TTS.
+# Hindi clips come from a separate, higher-quality engine — see
+# Dockerfile.indic / generate_clips_hi.py.
+#
+# Run from the `pre-generated-clips/` directory:
+#   docker build -t piper-clips -f docker/Dockerfile.piper .
+#   docker run --rm -v "$PWD:/work" piper-clips
+#
+# Models and generated wavs live on the host via the bind mount, so
+# subsequent runs are offline and instant.
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install "piper-tts==1.2.0"
+
+WORKDIR /work
+
+COPY scripts/generate_clips_en.py /opt/generate_clips_en.py
+
+ENV WORKDIR=/work
+
+ENTRYPOINT ["python", "/opt/generate_clips_en.py"]

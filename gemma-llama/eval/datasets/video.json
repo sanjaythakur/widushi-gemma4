@@ -1,0 +1,10 @@
+[
+  {
+    "file": "media/sample_lab.mp4",
+    "task": "describe what is happening in the clip",
+    "n_frames": 4,
+    "include_audio": true,
+    "expected_keys": ["summary", "observations", "safety_notes", "next_step"],
+    "notes": "Synthetic ffmpeg testsrc + sine. Tests assert frames_used >= 1, audio_used == true, and that the JSON-shaped tutor response contains the expected keys."
+  }
+]

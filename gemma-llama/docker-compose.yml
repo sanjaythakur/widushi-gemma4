@@ -1,0 +1,88 @@
+# ============================================================================
+# gemma-llama: two-container stack.
+#   - llama: llama.cpp llama-server with auto-downloaded GGUF model.
+#   - api:   FastAPI service that talks to llama via OpenAI-compatible API.
+# ============================================================================
+
+services:
+  llama:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.llama
+      args:
+        GGML_CUDA: "OFF"
+        # Pin to a tagged llama.cpp build that contains the April 2026 native
+        # Gemma 4 audio merge. Override in .env to bump.
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b8837}
+    image: gemma-llama/llama:cpu
+    container_name: gemma-llama-llama
+    restart: unless-stopped
+    volumes:
+      - ./models:/models
+    environment:
+      MODEL_DIR: /models
+      MODEL_PATH: /models/model.gguf
+      MMPROJ_PATH: /models/mmproj.gguf
+      MODEL_REPO: ${MODEL_REPO:-unsloth/gemma-4-E4B-it-GGUF}
+      MODEL_FILE: ${MODEL_FILE:-gemma-4-E4B-it-Q4_K_M.gguf}
+      # MMPROJ_* default to the official Google projector that ships inside
+      # the Gemma 4 E4B GGUF repo (April 2026 release). Override with empty
+      # strings if you want a text-only deployment.
+      MMPROJ_REPO: ${MMPROJ_REPO:-unsloth/gemma-4-E4B-it-GGUF}
+      MMPROJ_FILE: ${MMPROJ_FILE:-mmproj-BF16.gguf}
+      # On Pi 5 / CPU-only Macs we keep the projector resident on CPU. The
+      # GPU compose override flips this to "true" alongside GPU_LAYERS=99.
+      MMPROJ_USE_GPU: ${MMPROJ_USE_GPU:-false}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HOST: 0.0.0.0
+      PORT: 8080
+      CONTEXT_SIZE: ${CONTEXT_SIZE:-8192}
+      THREADS: ${THREADS:-4}
+      GPU_LAYERS: ${GPU_LAYERS:-0}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      start_period: 3600s
+      retries: 5
+    expose:
+      - "8080"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    image: gemma-llama/api:latest
+    container_name: gemma-llama-api
+    restart: unless-stopped
+    depends_on:
+      llama:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8010}:8000"
+    volumes:
+      # Piper voice cache. ./voices is created on first run; subsequent
+      # boots skip the download step entirely.
+      - ./voices:/voices
+      # WAV cache for the long-output `audio_url` shape. Bind-mounted (not
+      # tmpfs) so the TTL janitor can outlive a container restart cleanly
+      # while still being trivially throwable.
+      - ./tts_outputs:/tmp/tts_outputs
+    environment:
+      LLAMA_SERVER_URL: ${LLAMA_SERVER_URL:-http://llama:8080}
+      MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-model_configs/gemma4-e4b.yaml}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-300}
+      LLM_RETRIES: ${LLM_RETRIES:-3}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # ---- TTS (Piper) ----------------------------------------------------
+      TTS_ENABLED: ${TTS_ENABLED:-true}
+      PIPER_BINARY: ${PIPER_BINARY:-/usr/local/bin/piper}
+      TTS_VOICES_DIR: ${TTS_VOICES_DIR:-/voices}
+      TTS_OUTPUT_DIR: ${TTS_OUTPUT_DIR:-/tmp/tts_outputs}
+      TTS_OUTPUT_TTL_SECONDS: ${TTS_OUTPUT_TTL_SECONDS:-600}
+      TTS_DEFAULT_VOICE: ${TTS_DEFAULT_VOICE:-warm-academic}
+      TTS_VOICES_ENABLED: ${TTS_VOICES_ENABLED:-warm-academic,friendly-casual,neutral-news,energetic-kid,calm-storyteller}
+      TTS_MAX_SENTENCE_CHARS: ${TTS_MAX_SENTENCE_CHARS:-400}
+      TTS_MAX_CONCURRENCY: ${TTS_MAX_CONCURRENCY:-2}
+      # Required by docker/download_voices.sh to fetch from gated repos.
+      HF_TOKEN: ${HF_TOKEN:-}

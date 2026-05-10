@@ -1,0 +1,10 @@
+.git/
+__pycache__/
+*.pyc
+models/
+clips/
+*.onnx
+*.onnx.json
+README.md
+Makefile
+.hf-cache/

@@ -1,0 +1,88 @@
+# syntax=docker/dockerfile:1.6
+# ============================================================================
+# FastAPI service container.
+# ============================================================================
+FROM python:3.12-slim
+
+ARG TARGETARCH
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# ffmpeg powers the Pi-5-friendly audio/video prep in app/media_multipart.py:
+# transcoding any uploaded clip to mono 16 kHz WAV (mtmd-friendly) and sampling
+# evenly spaced JPEG frames in a single pass. Available natively on arm64.
+#
+# espeak-ng provides phonemiser data Piper falls back to for voices not
+# shipping their own. The actual Piper binary tarball already bundles the
+# minimum espeak-ng-data needed for the voices we ship -- the apt package is
+# a belt-and-braces backstop.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        ffmpeg \
+        espeak-ng \
+    && rm -rf /var/lib/apt/lists/*
+
+# ----------------------------------------------------------------------------
+# Piper TTS (rhasspy/piper -- prebuilt static binaries for arm64 + amd64).
+# Pinned to a known-good release. Override at build time with --build-arg
+# PIPER_VERSION=... to bump.
+# ----------------------------------------------------------------------------
+ARG PIPER_VERSION=2023.11.14-2
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+        arm64|aarch64) PIPER_ARCH="aarch64" ;; \
+        amd64|x86_64)  PIPER_ARCH="x86_64"  ;; \
+        armv7l|arm)    PIPER_ARCH="armv7l"  ;; \
+        *) echo "unsupported arch for Piper: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/rhasspy/piper/releases/download/${PIPER_VERSION}/piper_linux_${PIPER_ARCH}.tar.gz"; \
+    echo "downloading piper from ${url}"; \
+    curl -fL -o /tmp/piper.tar.gz "${url}"; \
+    mkdir -p /opt/piper; \
+    tar -xzf /tmp/piper.tar.gz -C /opt; \
+    rm /tmp/piper.tar.gz; \
+    ln -sf /opt/piper/piper /usr/local/bin/piper; \
+    /usr/local/bin/piper --help >/dev/null 2>&1 || true
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r /app/requirements.txt
+
+COPY app /app/app
+COPY model_configs /app/model_configs
+COPY docker/download_voices.sh /usr/local/bin/download_voices.sh
+RUN chmod +x /usr/local/bin/download_voices.sh
+
+ENV LLAMA_SERVER_URL=http://llama:8080 \
+    MODEL_CONFIG_PATH=model_configs/gemma4-e4b.yaml \
+    LOG_LEVEL=info \
+    LLM_TIMEOUT_SECONDS=300 \
+    LLM_RETRIES=3 \
+    TTS_ENABLED=true \
+    PIPER_BINARY=/usr/local/bin/piper \
+    TTS_VOICES_DIR=/voices \
+    TTS_OUTPUT_DIR=/tmp/tts_outputs \
+    TTS_OUTPUT_TTL_SECONDS=600 \
+    TTS_DEFAULT_VOICE=warm-academic \
+    TTS_VOICES_ENABLED=warm-academic,friendly-casual,neutral-news,energetic-kid,calm-storyteller \
+    TTS_MAX_SENTENCE_CHARS=400 \
+    TTS_MAX_CONCURRENCY=2
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+
+# download_voices.sh is idempotent: it only fetches voices that are not
+# already on the volume. Running it inside the CMD (rather than a separate
+# entrypoint) lets the api container start even if HF is briefly unreachable
+# -- the engine just logs "voice X not present, will 422 if requested".
+CMD ["/bin/bash", "-eo", "pipefail", "-c", "\
+    /usr/local/bin/download_voices.sh || echo '[voices] download script returned non-zero, continuing without all voices'; \
+    exec uvicorn app.main:app --host 0.0.0.0 --port 8000 \
+"]

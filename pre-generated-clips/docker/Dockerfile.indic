@@ -1,0 +1,50 @@
+# Image for generating Widushi's pre-recorded HINDI clips with
+# AI4Bharat's `indic-parler-tts`. The English clips come from a separate,
+# much smaller Piper image (Dockerfile.piper).
+#
+# Run from the `pre-generated-clips/` directory:
+#   docker build -t indic-clips -f docker/Dockerfile.indic .
+#   docker run --rm -v "$PWD:/work" indic-clips
+#
+# The HuggingFace cache lives under /work/models/.hf-cache via the bind
+# mount, so the ~3 GB model is downloaded only once per host.
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install torch + torchaudio CPU wheels alongside parler-tts and friends
+# in a single resolver pass so pip honours the CPU index for all of
+# them. Without this, parler-tts's transitive `torchaudio` dep gets
+# resolved from PyPI as the CUDA build and fails with `libcudart.so.13`.
+RUN pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+        "torch==2.4.1" \
+        "torchaudio==2.4.1" \
+        "git+https://github.com/huggingface/parler-tts.git" \
+        "transformers>=4.46,<4.49" \
+        "accelerate>=0.34" \
+        "sentencepiece>=0.2" \
+        "soundfile>=0.12" \
+        "scipy>=1.13" \
+        "numpy<2.3"
+
+WORKDIR /work
+
+COPY scripts/generate_clips_hi.py /opt/generate_clips_hi.py
+
+ENV WORKDIR=/work \
+    HF_HOME=/work/models/.hf-cache \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    TRANSFORMERS_OFFLINE=0
+
+ENTRYPOINT ["python", "/opt/generate_clips_hi.py"]

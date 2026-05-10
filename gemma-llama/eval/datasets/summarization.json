@@ -1,0 +1,26 @@
+[
+  {
+    "text": "Small language models, often abbreviated SLMs, are compact neural networks designed to run efficiently on edge devices such as phones, single-board computers, and embedded systems. They sacrifice some absolute accuracy compared to larger frontier models in exchange for dramatically reduced memory footprint, lower latency, and the ability to operate without a cloud connection. Recent SLMs leverage techniques like distillation, quantization, and mixture-of-experts routing to retain useful capabilities for tasks such as classification, extraction, and short-form generation.",
+    "reference": "Small language models are compact neural networks for edge devices that trade some accuracy for low memory use and offline operation, retaining capability via distillation, quantization, and MoE.",
+    "style": "tldr",
+    "max_sentences": 2
+  },
+  {
+    "text": "The Raspberry Pi 5 is a single-board computer built around the Broadcom BCM2712, featuring a 2.4 GHz quad-core Cortex-A76 CPU. With up to 16 GB of LPDDR4X RAM, dual 4Kp60 HDMI outputs, and a PCIe 2.0 lane, it is a meaningful step up from earlier generations and is suitable for light-duty AI inference workloads when paired with quantized models. While there is no GPU acceleration usable for general LLM inference, the four cores can drive small to mid-sized language models at acceptable token rates.",
+    "reference": "The Raspberry Pi 5 packs a 2.4 GHz quad-core Cortex-A76, up to 16 GB RAM, and PCIe 2.0; it can run quantized small LLMs on CPU at modest token rates without GPU offload.",
+    "style": "executive",
+    "max_sentences": 2
+  },
+  {
+    "text": "Docker Compose is a tool for defining and running multi-container Docker applications. With a single YAML file you describe the services, networks, and volumes that make up your stack. Bringing the stack up is then a matter of running 'docker compose up', which builds images as needed and starts each service in dependency order. Compose is well suited for development workflows and for simple production deployments where Kubernetes would be overkill.",
+    "reference": "Docker Compose lets you define a multi-container app in one YAML file and start it with a single command, making it ideal for development and lightweight production where Kubernetes is unnecessary.",
+    "style": null,
+    "max_sentences": 2
+  },
+  {
+    "text": "FastAPI is a modern, high-performance Python web framework for building APIs with Python type hints. It is built on top of Starlette for the web parts and Pydantic for data validation. Endpoints are declared as ordinary async functions; request bodies are validated against Pydantic models, and OpenAPI documentation is generated automatically. Its performance is on par with Node.js and Go for IO-bound workloads and is widely used to expose machine learning models behind HTTP.",
+    "reference": "FastAPI is a high-performance Python framework that uses type hints and Pydantic for validation, auto-generates OpenAPI docs, and is popular for serving ML models over HTTP.",
+    "style": "tldr",
+    "max_sentences": 2
+  }
+]

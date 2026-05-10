@@ -1,0 +1,24 @@
+# ============================================================================
+# GPU override for the llama container. Use as:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+# Requires the NVIDIA Container Toolkit on the host.
+# ============================================================================
+
+services:
+  llama:
+    build:
+      args:
+        GGML_CUDA: "ON"
+    image: gemma-llama/llama:cuda
+    environment:
+      GPU_LAYERS: ${GPU_LAYERS:-99}
+      # With CUDA available, pin the vision/audio projector on GPU too so the
+      # mmproj forward pass uses the device instead of falling back to CPU.
+      MMPROJ_USE_GPU: ${MMPROJ_USE_GPU:-true}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

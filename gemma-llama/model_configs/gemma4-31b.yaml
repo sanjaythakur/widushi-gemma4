@@ -1,0 +1,62 @@
+# Gemma 4 31B (dense). Largest member of the Gemma 4 family.
+#
+# Per the model card, 31B supports text + image only (no audio/video).
+# Requires ~20 GB RAM at Q4_K_M or GPU offload; not for Raspberry Pi.
+
+display_name: "Gemma 4 31B (it)"
+short_name: "31B"
+
+hf_repo: "unsloth/gemma-4-31B-it-GGUF"
+hf_file: "gemma-4-31B-it-Q4_K_M.gguf"
+mmproj_repo: "unsloth/gemma-4-31B-it-GGUF"
+mmproj_file: "mmproj-BF16.gguf"
+
+context_size: 16384
+threads: 8
+gpu_layers: 0
+
+modalities:
+  text: true
+  image: true
+  audio: false
+  video: false
+
+defaults:
+  max_tokens: 1024
+  temperature: 0.7
+  thinking: true
+
+prompts:
+  classify: |
+    You are a precise text classifier. Given the input text and the list of
+    candidate labels, choose {{ "one or more labels" if multi_label else "exactly one label" }}.
+    Respond ONLY with a JSON object of the form:
+      {"labels": ["label_a"{% if multi_label %}, "label_b"{% endif %}]}
+
+    Allowed labels: {{ labels | tojson }}
+
+    Text:
+    """
+    {{ text }}
+    """
+  extract: |
+    You are a structured-data extractor. Read the text below and produce a
+    single JSON object that exactly matches the requested schema. Use null for
+    any field that cannot be confidently extracted. Do NOT include any prose,
+    code fences, or commentary.
+
+    Schema:
+    {{ schema | tojson }}
+
+    Text:
+    """
+    {{ text }}
+    """
+  summarize: |
+    Summarize the following text{% if style %} in a {{ style }} style{% endif %}.
+    Be faithful, concise, and self-contained. Aim for {{ max_sentences }} sentences.
+
+    Text:
+    """
+    {{ text }}
+    """

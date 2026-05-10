@@ -1,0 +1,66 @@
+# --- Python (all subprojects) ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+build/
+dist/
+pip-wheel-metadata/
+
+# Testing / lint / types
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# --- Env & secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Models, weights & heavy caches ---
+# ONNX / quantized / GGUF binaries (restore via Docker or download scripts).
+*.gguf
+*.gguf.*
+*.onnx
+*.tflite
+*.pt
+*.pth
+*.safetensors
+
+# Hugging Face and similar download caches (large blob trees).
+**/.hf-cache/
+
+# Subproject conventions: whole trees that only hold downloads or generated outputs.
+gemma-llama/models/
+gemma-llama/voices/
+gemma-llama/tts_outputs/
+
+# pre-generated-clips caches model blobs under models/ but keeps *.onnx.json etc.
+pre-generated-clips/models/.hf-cache/
+
+# Scripted TTS outputs (see pre-generated-clips/README.md).
+pre-generated-clips/clips/
+
+# Gemma LLM service: evaluation reports produced by tooling.
+gemma-llama/eval/reports/*.json
+
+# --- Docker ---
+docker-compose.override.yml
+**/docker-compose.override.yml
+
+# --- OS / editor ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

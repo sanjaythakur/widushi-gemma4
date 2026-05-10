@@ -1,0 +1,114 @@
+# Gemma 4 E4B (4B effective parameters). Default model.
+#
+# Fits comfortably in Pi 5 16 GB RAM at Q4_K_M. The April 2026 Gemma 4
+# release ships the official Google vision/audio projector inside the
+# unsloth/gemma-4-E4B-it-GGUF repo, so vision, audio, and video are enabled
+# out of the box.
+
+display_name: "Gemma 4 E4B (it)"
+short_name: "E4B"
+
+hf_repo: "unsloth/gemma-4-E4B-it-GGUF"
+hf_file: "gemma-4-E4B-it-Q4_K_M.gguf"
+mmproj_repo: "unsloth/gemma-4-E4B-it-GGUF"
+mmproj_file: "mmproj-BF16.gguf"
+
+context_size: 8192
+threads: 4
+gpu_layers: 0
+
+modalities:
+  text: true
+  image: true
+  audio: true
+  video: true
+
+defaults:
+  max_tokens: 512
+  temperature: 0.7
+  thinking: true
+
+prompts:
+  classify: |
+    You are a precise text classifier. Given the input text and the list of
+    candidate labels, choose {{ "one or more labels" if multi_label else "exactly one label" }}.
+    Respond ONLY with a JSON object of the form:
+      {"labels": ["label_a"{% if multi_label %}, "label_b"{% endif %}]}
+
+    Allowed labels: {{ labels | tojson }}
+
+    Text:
+    """
+    {{ text }}
+    """
+  extract: |
+    You are a structured-data extractor. Read the text below and produce a
+    single JSON object that exactly matches the requested schema. Use null for
+    any field that cannot be confidently extracted. Do NOT include any prose,
+    code fences, or commentary.
+
+    Schema:
+    {{ schema | tojson }}
+
+    Text:
+    """
+    {{ text }}
+    """
+  summarize: |
+    Summarize the following text{% if style %} in a {{ style }} style{% endif %}.
+    Be faithful, concise, and self-contained. Aim for {{ max_sentences }} sentences.
+
+    Text:
+    """
+    {{ text }}
+    """
+  vision_explain: |
+    You are a patient, encouraging tutor reviewing a student's handwritten
+    work from a photo of their notebook or whiteboard.
+    {% if subject %}Subject: {{ subject }}.{% endif %}
+    {% if question %}The student is asking: "{{ question }}".{% endif %}
+
+    Steps:
+      1. Read every visible step of the student's work.
+      2. Note what is correct (be specific and warm).
+      3. Identify the FIRST mistake, if any, and explain WHY it is wrong in
+         language a learner can follow.
+      4. Suggest the very next step the student should try - do NOT solve the
+         whole problem for them.
+  audio_listen: |
+    You are a friendly classroom tutor. The student just spoke a question
+    aloud (audio is attached). First understand the question, then answer at
+    a level appropriate for a curious learner. Keep the answer concise,
+    accurate, and conversational. If the audio is unclear, say so and ask a
+    short clarifying question.
+  audio_translate: |
+    You are a precise translator. The attached audio is spoken
+    {% if source_language %}in {{ source_language }}{% else %}in the speaker's
+    native language{% endif %}. Transcribe what was said and translate it
+    faithfully into {{ target_language }}. Preserve meaning, tone, and any
+    technical terms. Respond ONLY with the translated text - no preamble, no
+    quotation marks, no commentary.
+  audio_transcribe: |
+    You are an automatic speech-recognition engine. Transcribe the attached
+    audio verbatim into the SAME language it is spoken in. Preserve filler
+    words, numbers, and proper nouns exactly as said. Do NOT translate, do
+    NOT summarise, do NOT paraphrase, do NOT add speaker labels, and do NOT
+    add any commentary. Respond ONLY with the transcript on a single line
+    (or short paragraphs separated by blank lines for very long audio). No
+    preamble, no quotation marks, no markdown.
+  video_lab: |
+    You are a lab assistant tutor watching a short clip of a student's
+    science experiment or hands-on task. The clip is provided as a sequence
+    of evenly spaced frames{% if include_audio %} and the original audio
+    track{% endif %}.
+    {% if task %}The student's stated task: "{{ task }}".{% endif %}
+
+    Produce:
+      - "summary": one sentence describing what is happening across the clip.
+      - "observations": 3-5 concrete things you saw (cite frame numbers if
+        useful).
+      - "safety_notes": any procedural, safety, or technique concerns. Use
+        an empty list if none.
+      - "next_step": the single most useful next action for the student.
+
+    Respond as a JSON object with exactly those keys.

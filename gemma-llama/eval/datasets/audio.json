@@ -1,0 +1,22 @@
+[
+  {
+    "file": "media/sample_question.wav",
+    "mode": "listen",
+    "expected_keywords": [],
+    "notes": "Synthetic 440 Hz tone. We only assert the codepath returns a non-empty answer; replace with a real spoken-question recording and add expected_keywords to upgrade this to a semantic check."
+  },
+  {
+    "file": "media/sample_question.wav",
+    "mode": "transcribe",
+    "expected_keywords": [],
+    "notes": "Synthetic tone has no real speech content. The test asserts HTTP 200 + non-empty text; supply a real recording for verbatim accuracy."
+  },
+  {
+    "file": "media/sample_question.wav",
+    "mode": "translate",
+    "target_language": "English",
+    "source_language": null,
+    "expected_keywords": [],
+    "notes": "Synthetic tone. Asserts the codepath round-trips; supply a real foreign-language recording for translation accuracy."
+  }
+]
