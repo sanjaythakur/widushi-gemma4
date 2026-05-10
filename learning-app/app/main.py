@@ -64,6 +64,7 @@ async def amain() -> None:
         queue,
         stop_signal=utterance_stop,
         followup_signal=followup_listen,
+        clips=services.clips,
     )
     server = build_uvicorn_server(
         orchestrator,
@@ -118,6 +119,7 @@ async def amain() -> None:
         )
         await services.gemma.aclose()
         await services.piper.aclose()
+        await services.clips.aclose()
         await services.db.close()
         pygame.quit()
         log.info("widushi exited")

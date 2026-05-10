@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from app.events import Event, EventType
 from app.input.utterance import FollowUpListenSignal
 from app.services import Services
+from app.services.gemma import GemmaReply
 from app.state import AppState
 
 log = logging.getLogger(__name__)
@@ -159,39 +160,63 @@ class Orchestrator:
         }
 
 
+async def _call_gemma(orch: Orchestrator, event: Event) -> GemmaReply:
+    audio_bytes = event.payload.get("audio_bytes")
+    if isinstance(audio_bytes, bytes):
+        return await orch.services.gemma.listen_audio_with_tts(
+            audio_bytes,
+            filename=str(event.payload.get("filename", "question.wav")),
+            content_type=str(event.payload.get("content_type", "audio/wav")),
+        )
+    prompt = event.payload.get("prompt", "")
+    return await orch.services.gemma.complete_with_tts(str(prompt))
+
+
 async def _thinking_side_effect(orch: Orchestrator, event: Event) -> None:
-    """Call Gemma and post REPLY_READY after text and audio are ready."""
+    """Call Gemma and post REPLY_READY after text and audio are ready.
+
+    Plays the ack clip (``wait_thinking`` for fresh turns,
+    ``wait_checking`` for follow-up loopbacks) concurrently with the
+    Gemma call so the clip masks Gemma's latency. REPLY_READY is only
+    posted after both finish so SPEAKING audio doesn't trample the clip.
+    """
+
+    is_followup = bool(event.payload.get("followup", False))
+    clip_id = "wait_checking" if is_followup else "wait_thinking"
+    clip_task = asyncio.create_task(orch.services.clips.play(clip_id))
 
     try:
-        audio_bytes = event.payload.get("audio_bytes")
-        if isinstance(audio_bytes, bytes):
-            reply = await orch.services.gemma.listen_audio_with_tts(
-                audio_bytes,
-                filename=str(event.payload.get("filename", "question.wav")),
-                content_type=str(event.payload.get("content_type", "audio/wav")),
+        try:
+            reply = await _call_gemma(orch, event)
+            if not isinstance(reply.audio_bytes, bytes):
+                raise RuntimeError("Gemma reply did not include audio bytes")
+        except asyncio.CancelledError:
+            clip_task.cancel()
+            await asyncio.gather(clip_task, return_exceptions=True)
+            raise
+        except Exception:
+            clip_task.cancel()
+            await asyncio.gather(clip_task, return_exceptions=True)
+            log.exception("gemma reply/TTS failed; cancelling turn")
+            await orch.queue.put(Event(EventType.CANCEL))
+            return
+
+        await asyncio.gather(clip_task, return_exceptions=True)
+        await orch.queue.put(
+            Event(
+                EventType.REPLY_READY,
+                payload={
+                    "text": reply.text,
+                    "audio_bytes": reply.audio_bytes,
+                    "audio_duration_ms": reply.audio_duration_ms,
+                    "voice": reply.voice,
+                },
             )
-        else:
-            prompt = event.payload.get("prompt", "")
-            reply = await orch.services.gemma.complete_with_tts(str(prompt))
-        if not isinstance(reply.audio_bytes, bytes):
-            raise RuntimeError("Gemma reply did not include audio bytes")
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        log.exception("gemma reply/TTS failed; cancelling turn")
-        await orch.queue.put(Event(EventType.CANCEL))
-        return
-    await orch.queue.put(
-        Event(
-            EventType.REPLY_READY,
-            payload={
-                "text": reply.text,
-                "audio_bytes": reply.audio_bytes,
-                "audio_duration_ms": reply.audio_duration_ms,
-                "voice": reply.voice,
-            },
         )
-    )
+    finally:
+        if not clip_task.done():
+            clip_task.cancel()
+            await asyncio.gather(clip_task, return_exceptions=True)
 
 
 async def _followup_listen_side_effect(orch: Orchestrator, event: Event) -> None:

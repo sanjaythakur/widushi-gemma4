@@ -11,6 +11,22 @@ import pytest
 from app.events import Event, EventType
 from app.input.utterance import FollowUpListenSignal, UtteranceStopSignal
 from app.input.wakeword import OPENWAKEWORD_FRAME_BYTES, WakeWordSource
+from app.orchestrator import Orchestrator
+from app.services import Services
+from app.services.clips import ClipPlayer
+from app.state import AppState
+
+
+class RecordingClips(ClipPlayer):
+    """ClipPlayer test double recording playback order."""
+
+    def __init__(self, *, latency_s: float = 0.0) -> None:
+        super().__init__(stub=True, latency_s=latency_s)
+        self.played: list[str] = []
+
+    async def play(self, clip_id: str) -> None:
+        self.played.append(clip_id)
+        await asyncio.sleep(self._latency_s)
 
 
 class FakeMic:
@@ -157,6 +173,95 @@ async def test_wakeword_source_records_question_after_wake(
 
 
 @pytest.mark.asyncio
+async def test_listen_start_clip_plays_before_recording_on_wake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a clip player is wired and the wake word fires, the source
+    must play ``listen_start`` before starting to record, and tag the
+    UTTERANCE_END payload with ``followup=False``.
+    """
+
+    monkeypatch.setattr("app.config.LISTENING_MIN_RECORDING_S", 0.0)
+    monkeypatch.setattr("app.config.LISTENING_TRAILING_SILENCE_S", 0.05)
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    detector = FakeDetector([{"vDu_shee": 0.9}])
+    voice = b"\xff\x7f" * (OPENWAKEWORD_FRAME_BYTES // 2)
+    silence = b"\x00" * OPENWAKEWORD_FRAME_BYTES
+    clock_values = iter([0.0, 0.1, 0.2, 0.3, 0.4])
+    clips = RecordingClips(latency_s=0.0)
+    source = WakeWordSource(
+        queue,
+        # Chunk 0 drives detection; clip plays (FakeMic.drain is a no-op
+        # because there's no underlying queue); chunks 1+ feed the recorder.
+        mic=FakeMic([silence, voice, silence, silence]),  # type: ignore[arg-type]
+        model_path=_model_file(tmp_path),
+        enabled=True,
+        threshold=0.5,
+        debounce_s=0,
+        clips=clips,
+        detector_factory=lambda _: detector,
+        clock=lambda: next(clock_values),
+    )
+
+    await _run_source(source)
+
+    wake = await asyncio.wait_for(queue.get(), timeout=1)
+    utterance = await asyncio.wait_for(queue.get(), timeout=1)
+    assert wake.type is EventType.WAKE_DETECTED
+    assert utterance.type is EventType.UTTERANCE_END
+    assert clips.played == ["listen_start"]
+    assert utterance.payload["followup"] is False
+
+
+@pytest.mark.asyncio
+async def test_followup_path_skips_listen_start_and_tags_followup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The follow-up loopback path must NOT play ``listen_start`` (the
+    user is mid-conversation) and must tag UTTERANCE_END with
+    ``followup=True`` so the FSM picks ``wait_checking``.
+    """
+
+    monkeypatch.setattr("app.config.LISTENING_MIN_RECORDING_S", 0.0)
+    monkeypatch.setattr("app.config.LISTENING_TRAILING_SILENCE_S", 0.05)
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_TIMEOUT_S", 5.0)
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    followup = FollowUpListenSignal()
+    followup.request()
+
+    detector = FakeDetector([{"vDu_shee": 0.0}] * 4)
+    voice = b"\xff\x7f" * (OPENWAKEWORD_FRAME_BYTES // 2)
+    silence = b"\x00" * OPENWAKEWORD_FRAME_BYTES
+    clock_values = iter([0.0, 0.1, 0.2, 0.3, 0.4])
+    clips = RecordingClips(latency_s=0.0)
+    source = WakeWordSource(
+        queue,
+        mic=FakeMic([voice, silence, silence]),  # type: ignore[arg-type]
+        model_path=_model_file(tmp_path),
+        enabled=True,
+        threshold=0.5,
+        debounce_s=0,
+        followup_signal=followup,
+        clips=clips,
+        detector_factory=lambda _: detector,
+        clock=lambda: next(clock_values),
+    )
+
+    await _run_source(source)
+
+    utterance = await asyncio.wait_for(queue.get(), timeout=1)
+    assert utterance.type is EventType.UTTERANCE_END
+    assert utterance.payload["followup"] is True
+    assert clips.played == [], "follow-up path must not play listen_start"
+
+
+@pytest.mark.asyncio
 async def test_initial_silence_after_wake_cancels_to_idle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -274,6 +379,148 @@ async def test_followup_signal_silence_emits_cancel(
     cancel = await asyncio.wait_for(queue.get(), timeout=1)
     assert cancel.type is EventType.CANCEL
     assert cancel.payload["cancel_reason"] == "no_voice_detected"
+
+
+@pytest.mark.asyncio
+async def test_listening_silence_drops_fsm_to_idle_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end proof that the LISTENING -> IDLE silence-timeout path
+    works through a real Orchestrator: WAKE_DETECTED moves the FSM to
+    LISTENING, the recorder hears only silence for
+    LISTENING_SILENCE_TIMEOUT_S, the wake-word source emits CANCEL, and
+    the orchestrator's wildcard CANCEL handler lands the FSM back in
+    IDLE so the user has to re-say "Widushi".
+    """
+
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    orch = Orchestrator(queue, Services.stubs())
+    transitions: list[tuple[AppState, AppState, EventType]] = []
+    orch.add_listener(
+        lambda prev, curr, ev: transitions.append((prev, curr, ev.type))
+    )
+
+    detector = FakeDetector([{"vDu_shee": 0.9}])
+    silence = b"\x00" * OPENWAKEWORD_FRAME_BYTES
+    # 1 wake-word frame + ~600 ms of silence (> 300 ms timeout).
+    mic = FakeMic([silence] * 31, delay_s=0.02)
+    source = WakeWordSource(
+        queue,
+        mic=mic,  # type: ignore[arg-type]
+        model_path=_model_file(tmp_path),
+        enabled=True,
+        threshold=0.5,
+        debounce_s=0,
+        detector_factory=lambda _: detector,
+    )
+
+    fsm_task = asyncio.create_task(orch.run())
+    source_task = asyncio.create_task(source.run())
+
+    try:
+        deadline = asyncio.get_event_loop().time() + 3.0
+        while asyncio.get_event_loop().time() < deadline:
+            if (
+                len(transitions) >= 2
+                and transitions[-1][1] is AppState.IDLE
+                and transitions[-1][2] is EventType.CANCEL
+            ):
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.put(Event(EventType.SHUTDOWN))
+        await asyncio.gather(fsm_task, source_task, return_exceptions=True)
+
+    states = [(prev.name, curr.name, ev.name) for prev, curr, ev in transitions]
+    assert states == [
+        ("IDLE", "LISTENING", "WAKE_DETECTED"),
+        ("LISTENING", "IDLE", "CANCEL"),
+    ], f"unexpected transitions: {states}"
+    assert orch.state is AppState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_followup_listening_silence_drops_fsm_to_idle_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end proof for the SPEAKING -> LISTENING follow-up loopback:
+    after PLAYBACK_DONE puts the FSM in LISTENING and raises the
+    follow-up signal, silence in the recorder must emit CANCEL and drop
+    the FSM back to IDLE so the wake word is required again.
+    """
+
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    services = Services.stubs()
+    services.gemma._latency_s = 0.01  # type: ignore[attr-defined]
+    services.piper._latency_s = 0.01  # type: ignore[attr-defined]
+
+    followup_listen = FollowUpListenSignal()
+    orch = Orchestrator(queue, services, followup_listen=followup_listen)
+    transitions: list[tuple[AppState, AppState, EventType]] = []
+    orch.add_listener(
+        lambda prev, curr, ev: transitions.append((prev, curr, ev.type))
+    )
+
+    # Detector always returns 0 -- the only way into LISTENING in this
+    # test is via the FSM raising the follow-up signal after PLAYBACK_DONE.
+    silence = b"\x00" * OPENWAKEWORD_FRAME_BYTES
+    detector = FakeDetector([{"vDu_shee": 0.0}] * 500)
+    mic = FakeMic([silence] * 500, delay_s=0.01)
+    source = WakeWordSource(
+        queue,
+        mic=mic,  # type: ignore[arg-type]
+        model_path=_model_file(tmp_path),
+        enabled=True,
+        threshold=0.5,
+        debounce_s=0,
+        followup_signal=followup_listen,
+        detector_factory=lambda _: detector,
+    )
+
+    fsm_task = asyncio.create_task(orch.run())
+    source_task = asyncio.create_task(source.run())
+
+    try:
+        # Drive a full turn through the FSM: WAKE_DETECTED + UTTERANCE_END
+        # walks IDLE -> LISTENING -> THINKING -> SPEAKING -> LISTENING
+        # (the SPEAKING -> LISTENING follow-up loopback). The loopback
+        # raises the follow-up signal, which the wake-word source picks
+        # up on its next mic chunk and starts a silent recording that
+        # times out -> CANCEL -> IDLE.
+        await queue.put(Event(EventType.WAKE_DETECTED))
+        await queue.put(Event(EventType.UTTERANCE_END, payload={"prompt": "hi"}))
+
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while asyncio.get_event_loop().time() < deadline:
+            if (
+                transitions
+                and transitions[-1][1] is AppState.IDLE
+                and transitions[-1][2] is EventType.CANCEL
+            ):
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        await queue.put(Event(EventType.SHUTDOWN))
+        source_task.cancel()
+        await asyncio.gather(fsm_task, source_task, return_exceptions=True)
+
+    states = [(prev.name, curr.name, ev.name) for prev, curr, ev in transitions]
+    assert states == [
+        ("IDLE", "LISTENING", "WAKE_DETECTED"),
+        ("LISTENING", "THINKING", "UTTERANCE_END"),
+        ("THINKING", "SPEAKING", "REPLY_READY"),
+        ("SPEAKING", "LISTENING", "PLAYBACK_DONE"),
+        ("LISTENING", "IDLE", "CANCEL"),
+    ], f"unexpected transitions: {states}"
+    assert orch.state is AppState.IDLE
 
 
 @pytest.mark.asyncio

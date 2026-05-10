@@ -33,10 +33,13 @@ flowchart LR
         orch -->|state| ui[Pygame UI Loop]
         orch -->|/audio/listen tts=true| gemmaC[GemmaClient]
         orch -->|play WAV| piperC[PiperClient playback]
+        orch -->|status clips| clipsC[ClipPlayer playback]
         orch -->|kv| dbC[Database stub]
+        wakeword -->|listen_start| clipsC
         ui -->|KEYDOWN| keyboard
     end
     gemmaC --> gemmaSvc[Gemma service :8010]
+    clipsC --> clipFiles[pre-generated-clips/clips]
 ```
 
 The pygame loop, asyncio orchestrator, and uvicorn all share a single
@@ -59,8 +62,11 @@ make run
 A 480x320 window opens with the IDLE face. The normal voice flow is:
 
 ```text
-IDLE --wake word--> LISTENING --recorded audio--> THINKING --Gemma text + WAV--> SPEAKING --playback done--> IDLE
+IDLE --wake word--> LISTENING --recorded audio--> THINKING --Gemma text + WAV--> SPEAKING --playback done--> LISTENING
 ```
+
+After answer playback, the app opens a follow-up listen. If no follow-up voice is
+heard before `LISTENING_SILENCE_TIMEOUT_S`, it cancels back to `IDLE`.
 
 Drive the FSM by hand when debugging:
 
@@ -110,7 +116,7 @@ for `WAKE_WORD_DEBOUNCE_S` seconds (default `2.0`).
 After a wake detection, the same microphone stream is used to record the
 student's question. The app wraps the captured mono 16 kHz int16 PCM in a WAV
 container and emits `UTTERANCE_END` with `audio_bytes`, `filename`,
-`content_type`, and `sample_rate`.
+`content_type`, `sample_rate`, and `followup=false`.
 
 Recording stops automatically after trailing silence or after the max recording
 duration. If no voice is heard within the silence timeout (applied on every
@@ -125,6 +131,7 @@ wake-word source automatically opens a follow-up listen so the student can ask
 another question without re-saying "Widushi". The same silence timeout governs
 the follow-up; if nobody answers within `LISTENING_SILENCE_TIMEOUT_S`, the FSM
 drops back to `IDLE` and the wake word is required again.
+Follow-up `UTTERANCE_END` events include `followup=true`.
 
 Useful tuning variables:
 
@@ -135,6 +142,38 @@ LISTENING_MIN_RECORDING_S=0.8
 LISTENING_MAX_RECORDING_S=15.0
 LISTENING_SILENCE_TIMEOUT_S=5.0
 ```
+
+## Pre-generated Acknowledgement Clips
+
+The app consumes the sibling
+[`../pre-generated-clips/`](../pre-generated-clips/) project's WAV library for
+short status cues. Clips are loaded from:
+
+```text
+../pre-generated-clips/clips/<lang>/<clip_id>.wav
+```
+
+Default language is English. Override it with:
+
+```bash
+WIDUSHI_CLIPS_LANG=en
+```
+
+Required phase-7 clips:
+
+| Clip ID | When played |
+|---------|-------------|
+| `listen_start` | After `WAKE_DETECTED`, before recording starts |
+| `wait_thinking` | During `THINKING` for first-turn questions |
+| `wait_checking` | During `THINKING` for follow-up questions |
+
+`ClipPlayer` shares pygame's mixer with reply playback, caches loaded WAVs, and
+logs missing clips without failing the turn. The wake-word path plays
+`listen_start` before `_record_utterance`, then drains the mic queue so captured
+speaker audio does not prefix the user's question. The THINKING side effect plays
+`wait_thinking` or `wait_checking` concurrently with the Gemma request and waits
+for both to finish before emitting `REPLY_READY`, preventing reply audio from
+overlapping the cue.
 
 ## Gemma Audio And TTS Service
 
@@ -170,6 +209,7 @@ GEMMA_URL=http://localhost:8010
 GEMMA_TIMEOUT_S=120
 GEMMA_TTS_ENABLED=true
 GEMMA_TTS_VOICE=warm-academic
+WIDUSHI_CLIPS_LANG=en
 ```
 
 If the Gemma service returns `audio_error` or omits `audio_url` while TTS is
@@ -233,7 +273,7 @@ app/
   orchestrator/        FSM owning state and dispatch table
   ui/loop.py           pygame loop coroutine
   ui/faces/            Idle/Listening/Thinking/Speaking face renderers
-  services/            Gemma HTTP client, WAV playback facade, Database stub
+  services/            Gemma HTTP client, WAV/clip playback, Database stub
   hardware/            Mic / Camera / Display abstractions
   input/               KeyboardSource, WakeWordSource, utterance helpers
   api/server.py        FastAPI control plane

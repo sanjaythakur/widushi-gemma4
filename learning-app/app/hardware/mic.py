@@ -23,6 +23,29 @@ class MicSource:
         self.chunk_ms = chunk_ms
         self.device = device
         self.stub = stub
+        self._queue: asyncio.Queue[bytes] | None = None
+
+    def drain(self) -> int:
+        """Discard any chunks currently buffered in the capture queue.
+
+        Used after playing a TTS clip through the same physical device
+        as the mic: while the clip plays, sounddevice keeps capturing
+        and the bounded queue fills up. Without draining, the recorder
+        would start with up to ``maxsize`` chunks of self-captured clip
+        audio. Returns the number of chunks dropped (handy for logs).
+        """
+
+        queue = self._queue
+        if queue is None:
+            return 0
+        dropped = 0
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+        return dropped
 
     async def frames(self) -> AsyncIterator[bytes]:
         """Yield mono int16 PCM chunks.
@@ -58,6 +81,7 @@ class MicSource:
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=8)
+        self._queue = queue
         chunk_samples = int(self.sample_rate * self.chunk_ms / 1000)
         blocksize = chunk_samples
 
@@ -85,13 +109,16 @@ class MicSource:
 
             loop.call_soon_threadsafe(put_nowait)
 
-        with sd.RawInputStream(
-            samplerate=self.sample_rate,
-            blocksize=blocksize,
-            channels=1,
-            dtype="int16",
-            device=self.device,
-            callback=callback,
-        ):
-            while True:
-                yield await queue.get()
+        try:
+            with sd.RawInputStream(
+                samplerate=self.sample_rate,
+                blocksize=blocksize,
+                channels=1,
+                dtype="int16",
+                device=self.device,
+                callback=callback,
+            ):
+                while True:
+                    yield await queue.get()
+        finally:
+            self._queue = None

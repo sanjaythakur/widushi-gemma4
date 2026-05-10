@@ -19,6 +19,7 @@ from app.input.utterance import (
     UtteranceStopSignal,
     pcm16_mono_to_wav,
 )
+from app.services.clips import ClipPlayer
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class WakeWordSource(InputSource):
         debounce_s: float = config.WAKE_WORD_DEBOUNCE_S,
         stop_signal: UtteranceStopSignal | None = None,
         followup_signal: FollowUpListenSignal | None = None,
+        clips: ClipPlayer | None = None,
         detector_factory: DetectorFactory = OpenWakeWordDetector,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -87,6 +89,7 @@ class WakeWordSource(InputSource):
         self._debounce_s = debounce_s
         self._stop_signal = stop_signal
         self._followup_signal = followup_signal
+        self._clips = clips
         self._detector_factory = detector_factory
         self._clock = clock
         self._last_detection_at = 0.0
@@ -138,6 +141,7 @@ class WakeWordSource(InputSource):
                         _prepend_chunk(chunk, frames),
                         bytearray(),
                     )
+                    payload["followup"] = True
                     event_type = (
                         EventType.CANCEL
                         if payload.get("cancel_reason")
@@ -151,8 +155,14 @@ class WakeWordSource(InputSource):
                     frame = bytes(buffer[:OPENWAKEWORD_FRAME_BYTES])
                     del buffer[:OPENWAKEWORD_FRAME_BYTES]
                     if await self._predict_frame(detector, frame):
+                        # Drop the wake-word pre-roll: by the time the
+                        # listen_start clip finishes, those samples are
+                        # stale and would otherwise prefix the recording.
+                        buffer.clear()
+                        await self._play_listen_start()
                         payload = await self._record_utterance(frames, buffer)
                         buffer.clear()
+                        payload["followup"] = False
                         event_type = (
                             EventType.CANCEL
                             if payload.get("cancel_reason")
@@ -193,6 +203,32 @@ class WakeWordSource(InputSource):
             )
         )
         return True
+
+    async def _play_listen_start(self) -> None:
+        """Play the ``listen_start`` clip and then flush any mic frames
+        captured during playback so the recording doesn't start with our
+        own clip audio echoing back.
+
+        The sounddevice mic queue is bounded (~8 chunks * 80 ms ≈ 640 ms);
+        without a post-play drain that buffered self-capture would prefix
+        the user's question. ``MicSource.drain`` is a no-op when the
+        queue isn't backed yet (e.g. ``FakeMic`` in tests).
+        """
+
+        if self._clips is None:
+            return
+
+        try:
+            await self._clips.play("listen_start")
+        finally:
+            drain = getattr(self._mic, "drain", None)
+            if callable(drain):
+                dropped = drain()
+                if dropped:
+                    log.debug(
+                        "drained %d mic chunks captured during listen_start",
+                        dropped,
+                    )
 
     async def _record_utterance(
         self,

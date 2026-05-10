@@ -20,9 +20,27 @@ from app.events import Event, EventType
 from app.input.utterance import FollowUpListenSignal
 from app.orchestrator import Orchestrator
 from app.services import Services
+from app.services.clips import ClipPlayer
 from app.services.gemma import GemmaClient, GemmaReply
 from app.services.piper import PiperClient
 from app.state import AppState
+
+
+class RecordingClips(ClipPlayer):
+    """ClipPlayer test double recording playback order and timing."""
+
+    def __init__(self, *, latency_s: float = 0.0) -> None:
+        super().__init__(stub=True, latency_s=latency_s)
+        self.played: list[str] = []
+        self.finished: list[str] = []
+
+    async def play(self, clip_id: str) -> None:
+        self.played.append(clip_id)
+        try:
+            await asyncio.sleep(self._latency_s)
+        except asyncio.CancelledError:
+            raise
+        self.finished.append(clip_id)
 
 
 @pytest.mark.asyncio
@@ -32,6 +50,7 @@ async def test_full_turn_round_trip() -> None:
     # Tighten the stub latencies so the test is fast.
     services.gemma._latency_s = 0.01  # type: ignore[attr-defined]
     services.piper._latency_s = 0.01  # type: ignore[attr-defined]
+    services.clips._latency_s = 0.0  # type: ignore[attr-defined]
 
     followup_listen = FollowUpListenSignal()
     orch = Orchestrator(queue, services, followup_listen=followup_listen)
@@ -91,6 +110,7 @@ async def test_playback_done_without_followup_signal_stays_in_listening() -> Non
     services = Services.stubs()
     services.gemma._latency_s = 0.01  # type: ignore[attr-defined]
     services.piper._latency_s = 0.01  # type: ignore[attr-defined]
+    services.clips._latency_s = 0.0  # type: ignore[attr-defined]
 
     orch = Orchestrator(queue, services)  # no followup_listen
     transitions: list[tuple[AppState, AppState, EventType]] = []
@@ -279,3 +299,180 @@ async def test_unknown_transitions_are_ignored() -> None:
 
     await queue.put(Event(EventType.SHUTDOWN))
     await asyncio.wait_for(runner, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_thinking_plays_wait_thinking_for_fresh_turn() -> None:
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    services = Services.stubs()
+    services.gemma._latency_s = 0.01  # type: ignore[attr-defined]
+    services.piper._latency_s = 0.01  # type: ignore[attr-defined]
+    clips = RecordingClips(latency_s=0.0)
+    services.clips = clips
+
+    orch = Orchestrator(queue, services)
+    runner = asyncio.create_task(orch.run())
+
+    try:
+        await queue.put(Event(EventType.WAKE_DETECTED))
+        await queue.put(
+            Event(
+                EventType.UTTERANCE_END,
+                payload={"prompt": "hi", "followup": False},
+            )
+        )
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            if orch.state is AppState.LISTENING and "wait_thinking" in clips.played:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.put(Event(EventType.SHUTDOWN))
+        await asyncio.wait_for(runner, timeout=2.0)
+
+    assert clips.played == ["wait_thinking"]
+    assert "wait_checking" not in clips.played
+
+
+@pytest.mark.asyncio
+async def test_thinking_plays_wait_checking_for_followup_turn() -> None:
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    services = Services.stubs()
+    services.gemma._latency_s = 0.01  # type: ignore[attr-defined]
+    services.piper._latency_s = 0.01  # type: ignore[attr-defined]
+    clips = RecordingClips(latency_s=0.0)
+    services.clips = clips
+
+    orch = Orchestrator(queue, services)
+    runner = asyncio.create_task(orch.run())
+
+    try:
+        await queue.put(Event(EventType.WAKE_DETECTED))
+        await queue.put(
+            Event(
+                EventType.UTTERANCE_END,
+                payload={"prompt": "hi", "followup": True},
+            )
+        )
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            if orch.state is AppState.LISTENING and "wait_checking" in clips.played:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.put(Event(EventType.SHUTDOWN))
+        await asyncio.wait_for(runner, timeout=2.0)
+
+    assert clips.played == ["wait_checking"]
+    assert "wait_thinking" not in clips.played
+
+
+@pytest.mark.asyncio
+async def test_reply_ready_waits_for_clip_to_finish() -> None:
+    """When the ack clip outlasts Gemma, REPLY_READY must not fire until
+    the clip is fully played -- otherwise SPEAKING audio talks over the
+    canned 'let me think' line.
+    """
+
+    class FastGemma(GemmaClient):
+        def __init__(self) -> None:
+            super().__init__(stub=True)
+
+        async def complete_with_tts(self, prompt: str) -> GemmaReply:
+            await asyncio.sleep(0.01)
+            return GemmaReply(
+                text="ok",
+                audio_bytes=b"answer wav",
+                audio_duration_ms=10.0,
+                voice="warm-academic",
+            )
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    services = Services.stubs()
+    services.gemma = FastGemma()
+    services.piper._latency_s = 0.01  # type: ignore[attr-defined]
+    clips = RecordingClips(latency_s=0.2)
+    services.clips = clips
+
+    orch = Orchestrator(queue, services)
+
+    reply_ready_at: list[float] = []
+    orch.add_listener(
+        lambda _prev, _curr, ev: reply_ready_at.append(asyncio.get_event_loop().time())
+        if ev.type is EventType.REPLY_READY
+        else None
+    )
+
+    runner = asyncio.create_task(orch.run())
+    try:
+        await queue.put(Event(EventType.WAKE_DETECTED))
+        await queue.put(
+            Event(
+                EventType.UTTERANCE_END,
+                payload={"prompt": "hi", "followup": False},
+            )
+        )
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            if reply_ready_at and clips.finished == ["wait_thinking"]:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.put(Event(EventType.SHUTDOWN))
+        await asyncio.wait_for(runner, timeout=2.0)
+
+    assert clips.finished == ["wait_thinking"], (
+        "ack clip must finish before REPLY_READY"
+    )
+    assert reply_ready_at, "REPLY_READY never observed"
+
+
+@pytest.mark.asyncio
+async def test_gemma_failure_cancels_in_flight_clip() -> None:
+    """If Gemma raises, the in-flight ack clip must be cancelled and
+    the turn must CANCEL back to IDLE without REPLY_READY firing.
+    """
+
+    class FailingGemma(GemmaClient):
+        def __init__(self) -> None:
+            super().__init__(stub=True)
+
+        async def complete_with_tts(self, prompt: str) -> GemmaReply:
+            await asyncio.sleep(0.01)
+            raise RuntimeError("gemma boom")
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    services = Services.stubs()
+    services.gemma = FailingGemma()
+    clips = RecordingClips(latency_s=2.0)  # would outlast the test if not cancelled
+    services.clips = clips
+
+    orch = Orchestrator(queue, services)
+    transitions: list[tuple[AppState, AppState, EventType]] = []
+    orch.add_listener(
+        lambda prev, curr, ev: transitions.append((prev, curr, ev.type))
+    )
+
+    runner = asyncio.create_task(orch.run())
+    try:
+        await queue.put(Event(EventType.WAKE_DETECTED))
+        await queue.put(Event(EventType.UTTERANCE_END, payload={"prompt": "hi"}))
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            if transitions and transitions[-1][1] is AppState.IDLE:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.put(Event(EventType.SHUTDOWN))
+        await asyncio.wait_for(runner, timeout=2.0)
+
+    assert clips.played == ["wait_thinking"]
+    assert "wait_thinking" not in clips.finished, (
+        "Gemma failure must cancel the in-flight clip"
+    )
+    states = [(prev.name, curr.name, ev.name) for prev, curr, ev in transitions]
+    assert states == [
+        ("IDLE", "LISTENING", "WAKE_DETECTED"),
+        ("LISTENING", "THINKING", "UTTERANCE_END"),
+        ("THINKING", "IDLE", "CANCEL"),
+    ]

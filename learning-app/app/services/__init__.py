@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app import config
+from app.services.clips import ClipPlayer
 from app.services.db import Database
 from app.services.gemma import GemmaClient
 from app.services.piper import PiperClient
@@ -22,6 +23,7 @@ class Services:
 
     gemma: GemmaClient
     piper: PiperClient
+    clips: ClipPlayer
     db: Database
 
     @classmethod
@@ -31,6 +33,7 @@ class Services:
         return cls(
             gemma=GemmaClient(stub=True),
             piper=PiperClient(stub=True),
+            clips=ClipPlayer(stub=True),
             db=Database(),
         )
 
@@ -41,8 +44,9 @@ class Services:
         return cls(
             gemma=GemmaClient(url=config.GEMMA_URL, timeout_s=config.GEMMA_TIMEOUT_S),
             piper=PiperClient(),
+            clips=ClipPlayer(),
             db=Database(),
         )
 
 
-__all__ = ["Database", "GemmaClient", "PiperClient", "Services"]
+__all__ = ["ClipPlayer", "Database", "GemmaClient", "PiperClient", "Services"]

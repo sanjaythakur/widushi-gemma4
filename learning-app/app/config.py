@@ -54,6 +54,9 @@ GEMMA_TTS_VOICE: str = os.environ.get("GEMMA_TTS_VOICE", "warm-academic")
 # Pre-recorded TTS clips and the wake word model are produced by other
 # sibling projects. We expose their paths here for later phases.
 CLIPS_DIR: Path = WORKSPACE_ROOT / "pre-generated-clips" / "clips"
+# Language subdirectory inside CLIPS_DIR. Swap to "hi" once Hindi clips
+# have been generated under pre-generated-clips/clips/hi/.
+CLIPS_LANG: str = os.environ.get("WIDUSHI_CLIPS_LANG", "en")
 WAKE_WORD_MODEL: Path = Path(
     os.environ.get(
         "WAKE_WORD_MODEL",
