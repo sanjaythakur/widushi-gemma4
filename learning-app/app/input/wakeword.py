@@ -243,7 +243,14 @@ class WakeWordSource(InputSource):
         buffered.clear()
 
         started_at = self._clock()
+        # voiced_seen only flips True after LISTENING_VOICE_ONSET_FRAMES
+        # *consecutive* voiced chunks. voiced_run tracks the current run
+        # of voiced chunks and resets on any silent chunk so a single
+        # blip (fan, chair creak, listen_start clip echo) can't disarm
+        # the no-voice silence-timeout fallback.
         voiced_seen = False
+        voiced_run = 0
+        onset_required = max(1, int(config.LISTENING_VOICE_ONSET_FRAMES))
         silence_started_at: float | None = None
         log.info("listening for spoken question")
         try:
@@ -256,10 +263,14 @@ class WakeWordSource(InputSource):
                 rms = _pcm16_rms(prepared)
                 is_silent = rms < config.LISTENING_SILENCE_RMS_THRESHOLD
                 if not is_silent:
-                    voiced_seen = True
-                    silence_started_at = None
-                elif silence_started_at is None:
-                    silence_started_at = now
+                    voiced_run += 1
+                    if voiced_run >= onset_required:
+                        voiced_seen = True
+                        silence_started_at = None
+                else:
+                    voiced_run = 0
+                    if silence_started_at is None:
+                        silence_started_at = now
 
                 trailing_silence = (
                     silence_started_at is not None

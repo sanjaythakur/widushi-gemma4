@@ -1,3 +1,7 @@
+# Monorepo root — applies to learning-app/, gemma-llama/, pre-generated-clips/,
+# and shared tooling. Subprojects may add their own .gitignore for paths only
+# relevant inside that directory.
+
 # --- Python (all subprojects) ---
 __pycache__/
 *.py[cod]
@@ -20,6 +24,12 @@ pip-wheel-metadata/
 htmlcov/
 .tox/
 .nox/
+coverage.xml
+.hypothesis/
+
+# --- Local databases (dev / ad-hoc runs) ---
+*.sqlite
+*.sqlite3
 
 # --- Env & secrets ---
 .env

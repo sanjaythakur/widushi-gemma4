@@ -140,15 +140,19 @@ async def test_wakeword_source_records_question_after_wake(
     monkeypatch.setattr("app.config.LISTENING_MIN_RECORDING_S", 0.0)
     monkeypatch.setattr("app.config.LISTENING_TRAILING_SILENCE_S", 0.05)
     monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
+    monkeypatch.setattr("app.config.LISTENING_VOICE_ONSET_FRAMES", 2)
 
     queue: asyncio.Queue[Event] = asyncio.Queue()
     detector = FakeDetector([{"vDu_shee": 0.9}])
     voice = b"\xff\x7f" * (OPENWAKEWORD_FRAME_BYTES // 2)
     silence = b"\x00" * OPENWAKEWORD_FRAME_BYTES
-    clock_values = iter([0.0, 0.1, 0.2, 0.3, 0.4])
+    clock_values = iter([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
     source = WakeWordSource(
         queue,
-        mic=FakeMic([silence, voice, silence, silence]),  # type: ignore[arg-type]
+        # Two consecutive voice frames are required to trip voiced_seen
+        # under the default LISTENING_VOICE_ONSET_FRAMES so a single
+        # ambient-noise blip can't be mistaken for speech.
+        mic=FakeMic([silence, voice, voice, silence, silence]),  # type: ignore[arg-type]
         model_path=_model_file(tmp_path),
         enabled=True,
         threshold=0.5,
@@ -185,18 +189,21 @@ async def test_listen_start_clip_plays_before_recording_on_wake(
     monkeypatch.setattr("app.config.LISTENING_MIN_RECORDING_S", 0.0)
     monkeypatch.setattr("app.config.LISTENING_TRAILING_SILENCE_S", 0.05)
     monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
+    monkeypatch.setattr("app.config.LISTENING_VOICE_ONSET_FRAMES", 2)
 
     queue: asyncio.Queue[Event] = asyncio.Queue()
     detector = FakeDetector([{"vDu_shee": 0.9}])
     voice = b"\xff\x7f" * (OPENWAKEWORD_FRAME_BYTES // 2)
     silence = b"\x00" * OPENWAKEWORD_FRAME_BYTES
-    clock_values = iter([0.0, 0.1, 0.2, 0.3, 0.4])
+    clock_values = iter([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
     clips = RecordingClips(latency_s=0.0)
     source = WakeWordSource(
         queue,
         # Chunk 0 drives detection; clip plays (FakeMic.drain is a no-op
-        # because there's no underlying queue); chunks 1+ feed the recorder.
-        mic=FakeMic([silence, voice, silence, silence]),  # type: ignore[arg-type]
+        # because there's no underlying queue); chunks 1+ feed the
+        # recorder. Two consecutive voice frames are required for the
+        # onset filter to declare voiced_seen.
+        mic=FakeMic([silence, voice, voice, silence, silence]),  # type: ignore[arg-type]
         model_path=_model_file(tmp_path),
         enabled=True,
         threshold=0.5,
@@ -230,6 +237,7 @@ async def test_followup_path_skips_listen_start_and_tags_followup(
     monkeypatch.setattr("app.config.LISTENING_TRAILING_SILENCE_S", 0.05)
     monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
     monkeypatch.setattr("app.config.LISTENING_SILENCE_TIMEOUT_S", 5.0)
+    monkeypatch.setattr("app.config.LISTENING_VOICE_ONSET_FRAMES", 2)
 
     queue: asyncio.Queue[Event] = asyncio.Queue()
     followup = FollowUpListenSignal()
@@ -242,7 +250,7 @@ async def test_followup_path_skips_listen_start_and_tags_followup(
     clips = RecordingClips(latency_s=0.0)
     source = WakeWordSource(
         queue,
-        mic=FakeMic([voice, silence, silence]),  # type: ignore[arg-type]
+        mic=FakeMic([voice, voice, silence, silence]),  # type: ignore[arg-type]
         model_path=_model_file(tmp_path),
         enabled=True,
         threshold=0.5,
@@ -307,6 +315,7 @@ async def test_followup_signal_records_without_wake_word(
     monkeypatch.setattr("app.config.LISTENING_TRAILING_SILENCE_S", 0.05)
     monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
     monkeypatch.setattr("app.config.LISTENING_SILENCE_TIMEOUT_S", 5.0)
+    monkeypatch.setattr("app.config.LISTENING_VOICE_ONSET_FRAMES", 2)
 
     queue: asyncio.Queue[Event] = asyncio.Queue()
     followup = FollowUpListenSignal()
@@ -320,7 +329,7 @@ async def test_followup_signal_records_without_wake_word(
     # chunk leaks into the detector after the follow-up listen ends.
     source = WakeWordSource(
         queue,
-        mic=FakeMic([voice, silence, silence]),  # type: ignore[arg-type]
+        mic=FakeMic([voice, voice, silence, silence]),  # type: ignore[arg-type]
         model_path=_model_file(tmp_path),
         enabled=True,
         threshold=0.5,
@@ -521,6 +530,56 @@ async def test_followup_listening_silence_drops_fsm_to_idle_end_to_end(
         ("LISTENING", "IDLE", "CANCEL"),
     ], f"unexpected transitions: {states}"
     assert orch.state is AppState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_single_noise_blip_does_not_disarm_silence_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single isolated chunk above the RMS threshold (e.g. a fan blip,
+    a chair creak, the tail of the ``listen_start`` clip echoing back
+    through the mic) must NOT count as "voice detected" — otherwise the
+    LISTENING_SILENCE_TIMEOUT_S no-voice -> CANCEL fallback never fires
+    and the FSM marches straight to THINKING even though the user said
+    nothing. The voice-onset filter requires
+    ``LISTENING_VOICE_ONSET_FRAMES`` consecutive voiced chunks.
+    """
+
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr("app.config.LISTENING_TRAILING_SILENCE_S", 0.05)
+    monkeypatch.setattr("app.config.LISTENING_SILENCE_RMS_THRESHOLD", 500.0)
+    monkeypatch.setattr("app.config.LISTENING_VOICE_ONSET_FRAMES", 2)
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    detector = FakeDetector([{"vDu_shee": 0.9}])
+    voice = b"\xff\x7f" * (OPENWAKEWORD_FRAME_BYTES // 2)
+    silence = b"\x00" * OPENWAKEWORD_FRAME_BYTES
+    clock_values = iter([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    source = WakeWordSource(
+        queue,
+        # Wake-word frame, then a single noise blip surrounded by
+        # silence. Without the onset filter that one blip would flip
+        # voiced_seen=True and the recorder would wait for trailing
+        # silence -> UTTERANCE_END instead of CANCEL.
+        mic=FakeMic([silence, silence, voice, silence, silence, silence]),  # type: ignore[arg-type]
+        model_path=_model_file(tmp_path),
+        enabled=True,
+        threshold=0.5,
+        debounce_s=0,
+        detector_factory=lambda _: detector,
+        clock=lambda: next(clock_values),
+    )
+
+    await _run_source(source)
+
+    wake = await asyncio.wait_for(queue.get(), timeout=1)
+    cancel = await asyncio.wait_for(queue.get(), timeout=1)
+    assert wake.type is EventType.WAKE_DETECTED
+    assert cancel.type is EventType.CANCEL, (
+        "single noise blip must not be treated as user speech"
+    )
+    assert cancel.payload["cancel_reason"] == "no_voice_detected"
 
 
 @pytest.mark.asyncio

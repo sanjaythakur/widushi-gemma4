@@ -126,6 +126,15 @@ without calling Gemma. The cancel event includes `cancel_reason="no_voice_detect
 for logs and tests. Recording can also be stopped manually with ENTER or
 `POST /events {"type":"UTTERANCE_END"}`.
 
+The recorder decides whether the student has started speaking with an RMS-based
+voice gate. It now requires multiple consecutive voiced chunks before setting
+`voiced_seen=true`; a single 80 ms noise blip (fan, chair creak, breathing on
+the mic, or the tail of `listen_start` echoing back through the speaker) should
+not disarm the no-voice timeout. Once real voice is detected, trailing silence
+ends the turn. Keep that trailing-silence window long enough for natural thinking
+pauses between words and phrases, otherwise `LISTENING` can emit
+`UTTERANCE_END` and move to `THINKING` mid-sentence.
+
 After playback finishes, the FSM transitions `SPEAKING -> LISTENING` and the
 wake-word source automatically opens a follow-up listen so the student can ask
 another question without re-saying "Widushi". The same silence timeout governs
@@ -136,12 +145,21 @@ Follow-up `UTTERANCE_END` events include `followup=true`.
 Useful tuning variables:
 
 ```bash
-LISTENING_SILENCE_RMS_THRESHOLD=500
-LISTENING_TRAILING_SILENCE_S=1.0
+LISTENING_SILENCE_RMS_THRESHOLD=800
+LISTENING_VOICE_ONSET_FRAMES=2
+LISTENING_TRAILING_SILENCE_S=1.5
 LISTENING_MIN_RECORDING_S=0.8
 LISTENING_MAX_RECORDING_S=15.0
 LISTENING_SILENCE_TIMEOUT_S=5.0
 ```
+
+If the app still thinks silence is speech, measure the local mic noise floor:
+temporarily log `_pcm16_rms(prepared)` inside `_record_utterance`, then watch a
+few seconds of quiet-room chunks and a few normal spoken chunks. Set
+`LISTENING_SILENCE_RMS_THRESHOLD` comfortably above the quiet-room peaks but
+below soft speech; increase `LISTENING_VOICE_ONSET_FRAMES` to `3` if isolated
+blips still sneak through, or increase `LISTENING_TRAILING_SILENCE_S` to `2.0`
+if natural pauses still cut utterances short.
 
 ## Pre-generated Acknowledgement Clips
 

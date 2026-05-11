@@ -70,11 +70,27 @@ WAKE_WORD_FRAME_MS: int = int(os.environ.get("WAKE_WORD_FRAME_MS", "80"))
 
 # Spoken-question capture after the wake word. Audio is recorded as
 # mono int16 PCM at the wake-word sample rate, then wrapped as WAV for Gemma.
+#
+# RMS threshold above which a single 80 ms chunk is treated as "voiced".
+# Tuned for a USB desk mic in a quiet-but-not-silent room (fan, distant
+# AC, light typing). Crank it up if ambient noise keeps tripping the
+# recorder, or down if a soft-spoken kid never registers as voice.
 LISTENING_SILENCE_RMS_THRESHOLD: float = float(
-    os.environ.get("LISTENING_SILENCE_RMS_THRESHOLD", "500")
+    os.environ.get("LISTENING_SILENCE_RMS_THRESHOLD", "800")
 )
+# How many *consecutive* voiced chunks (80 ms each) the recorder must
+# observe before it commits to "the user is speaking". A value of 2
+# (~160 ms) filters single-chunk noise blips (fan, chair creak, tail of
+# the listen_start clip echoing back through the mic) which would
+# otherwise disarm the LISTENING_SILENCE_TIMEOUT_S no-voice fallback.
+LISTENING_VOICE_ONSET_FRAMES: int = int(
+    os.environ.get("LISTENING_VOICE_ONSET_FRAMES", "2")
+)
+# Length of trailing silence that ends a recording. Bumped from 1.0 s
+# to 1.5 s because natural between-phrase pauses ("uh... one plus...
+# one") routinely exceed 1 s and were being mistaken for end-of-turn.
 LISTENING_TRAILING_SILENCE_S: float = float(
-    os.environ.get("LISTENING_TRAILING_SILENCE_S", "1.0")
+    os.environ.get("LISTENING_TRAILING_SILENCE_S", "1.5")
 )
 LISTENING_MIN_RECORDING_S: float = float(os.environ.get("LISTENING_MIN_RECORDING_S", "0.8"))
 LISTENING_MAX_RECORDING_S: float = float(os.environ.get("LISTENING_MAX_RECORDING_S", "15.0"))
