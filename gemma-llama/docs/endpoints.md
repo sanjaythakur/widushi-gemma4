@@ -13,11 +13,13 @@ JSON.
 
 > **Defaults you should know about**
 >
-> - **Active model**: Gemma 4 E4B (it), Q4_K_M quantisation, with vision +
+> - **Active model**: Gemma 4 E4B (it), Q4_0 quantisation (Pi 5 default; flip to a K-quant on CUDA / Apple-silicon), with vision +
 >   audio + video enabled by default. The April 2026 Gemma 4 release ships
 >   the official Google projector inside `unsloth/gemma-4-E4B-it-GGUF`
->   (`mmproj-BF16.gguf`), so the multimodal tutor routes work out of the
->   box. To run text-only, blank `MMPROJ_REPO`/`MMPROJ_FILE` in
+>   (default `mmproj-F16.gguf`; F16 is the fastest precision on Pi 5 /
+>   consumer CPUs, switch to `mmproj-BF16.gguf` on CUDA / Apple-silicon
+>   hosts), so the multimodal tutor routes work out of the box. To run
+>   text-only, blank `MMPROJ_REPO`/`MMPROJ_FILE` in
 >   [`.env.example`](../.env.example) and flip the modality flags off in
 >   `model_configs/gemma4-e4b.yaml`.
 > - **Modality order (per official Gemma 4 docs)**: visual and audio tokens
@@ -29,8 +31,8 @@ JSON.
 >   audio encoder expects), video is sampled into ≤ 12 evenly spaced JPEG
 >   frames + an optional audio track via a single `ffmpeg` pass.
 > - **Audio support** uses llama.cpp's natively-merged Gemma 4 audio path
->   plus the official `mmproj-BF16.gguf` projector that ships in the same
->   Unsloth Gemma 4 repo as the model weights.
+>   plus the official unified mmproj projector (F16 / BF16 / F32 all live
+>   in the same Unsloth Gemma 4 repo as the model weights).
 
 ---
 
@@ -342,7 +344,7 @@ Sample call:
 curl -X POST http://localhost:8010/video/analyze-process \
     -F "video=@titration.mp4" \
     -F "task=titrate NaOH into HCl until colour change" \
-    -F "n_frames=8"
+    -F "n_frames=4"
 ```
 
 Sample response:

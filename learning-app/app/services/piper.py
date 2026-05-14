@@ -15,6 +15,8 @@ from typing import Any
 
 import pygame
 
+from app.hardware.audio import init_pygame_mixer
+
 log = logging.getLogger(__name__)
 
 
@@ -62,7 +64,7 @@ class PiperClient:
 
     def _ensure_mixer(self) -> None:
         if not pygame.mixer.get_init():
-            pygame.mixer.init()
+            init_pygame_mixer()
 
     def _stub_sleep_s(self, duration_ms: float | None) -> float:
         if duration_ms is None:

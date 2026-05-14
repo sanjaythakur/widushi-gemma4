@@ -1,17 +1,18 @@
 # Gemma 4 E4B (4B effective parameters). Default model.
 #
-# Fits comfortably in Pi 5 16 GB RAM at Q4_K_M. The April 2026 Gemma 4
+# Fits comfortably in Pi 5 16 GB RAM at Q4_0. The April 2026 Gemma 4
 # release ships the official Google vision/audio projector inside the
 # unsloth/gemma-4-E4B-it-GGUF repo, so vision, audio, and video are enabled
-# out of the box.
+# out of the box. Q4_0 is preferred on Pi 5 because it hits llama.cpp's
+# repacked dotprod SGEMM kernel; switch to Q4_K_M on CUDA / Apple-silicon.
 
 display_name: "Gemma 4 E4B (it)"
 short_name: "E4B"
 
 hf_repo: "unsloth/gemma-4-E4B-it-GGUF"
-hf_file: "gemma-4-E4B-it-Q4_K_M.gguf"
+hf_file: "gemma-4-E4B-it-Q4_0.gguf"
 mmproj_repo: "unsloth/gemma-4-E4B-it-GGUF"
-mmproj_file: "mmproj-BF16.gguf"
+mmproj_file: "mmproj-F16.gguf"
 
 context_size: 8192
 threads: 4
@@ -26,7 +27,10 @@ modalities:
 defaults:
   max_tokens: 512
   temperature: 0.7
-  thinking: true
+  # Default off: chain-of-thought roughly doubles decoded tokens on Pi 5 for
+  # the same final answer. Each endpoint exposes a `thinking` parameter so
+  # callers can opt back in per-request for harder questions.
+  thinking: false
 
 prompts:
   classify: |

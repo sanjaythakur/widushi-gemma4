@@ -20,6 +20,7 @@ from app.input.utterance import (
     pcm16_mono_to_wav,
 )
 from app.services.clips import ClipPlayer
+from app.state import AppState
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class WakeWordSource(InputSource):
         clips: ClipPlayer | None = None,
         detector_factory: DetectorFactory = OpenWakeWordDetector,
         clock: Callable[[], float] = time.monotonic,
+        state_getter: Callable[[], AppState] | None = None,
     ) -> None:
         super().__init__(queue)
         self._mic = mic or MicSource(
@@ -92,7 +94,15 @@ class WakeWordSource(InputSource):
         self._clips = clips
         self._detector_factory = detector_factory
         self._clock = clock
+        # Optional read-only view of the orchestrator's current state.
+        # When provided, wake-word prediction is gated on the FSM being
+        # in IDLE so background noise (or the user's continued talking)
+        # cannot start a phantom recording while a turn is mid-flight in
+        # THINKING/SPEAKING. None means "always-on" (used by the unit
+        # tests, which exercise the source in isolation).
+        self._state_getter = state_getter
         self._last_detection_at = 0.0
+        self._gated_state_logged: AppState | None = None
 
     async def run(self) -> None:
         if not self._enabled:
@@ -136,6 +146,7 @@ class WakeWordSource(InputSource):
                     and self._followup_signal.consume()
                 ):
                     buffer.clear()
+                    self._gated_state_logged = None
                     log.info("follow-up listen requested; recording without wake word")
                     payload = await self._record_utterance(
                         _prepend_chunk(chunk, frames),
@@ -149,6 +160,32 @@ class WakeWordSource(InputSource):
                     )
                     await self.emit(Event(event_type, payload=payload))
                     continue
+
+                # Skip wake-word detection while a turn is in flight.
+                # Without this, the user's continued talking (or pure
+                # background noise above threshold) keeps re-firing
+                # WAKE_DETECTED during THINKING/SPEAKING. The FSM
+                # silently ignores those events (no entry in the
+                # dispatch table for that state), but the source still
+                # plays ``listen_start`` and starts a 15 s recording
+                # whose UTTERANCE_END is also dropped — wasting Gemma
+                # latency and confusing the user, who sees ``listening
+                # for spoken question`` lines while the UI still shows
+                # the THINKING face.
+                current_state = (
+                    self._state_getter() if self._state_getter is not None else None
+                )
+                if current_state is not None and current_state is not AppState.IDLE:
+                    if buffer:
+                        buffer.clear()
+                    if self._gated_state_logged is not current_state:
+                        log.debug(
+                            "wake-word detection paused while FSM in %s",
+                            current_state.name,
+                        )
+                        self._gated_state_logged = current_state
+                    continue
+                self._gated_state_logged = None
 
                 buffer.extend(prepared)
                 while len(buffer) >= OPENWAKEWORD_FRAME_BYTES:
@@ -252,6 +289,8 @@ class WakeWordSource(InputSource):
         voiced_run = 0
         onset_required = max(1, int(config.LISTENING_VOICE_ONSET_FRAMES))
         silence_started_at: float | None = None
+        rms_debug = config.LISTENING_RMS_DEBUG
+        chunk_idx = 0
         log.info("listening for spoken question")
         try:
             async for chunk in frames:
@@ -271,6 +310,19 @@ class WakeWordSource(InputSource):
                     voiced_run = 0
                     if silence_started_at is None:
                         silence_started_at = now
+
+                if rms_debug:
+                    log.info(
+                        "rms[%03d] t=%.2fs rms=%.0f thr=%.0f %s run=%d seen=%s",
+                        chunk_idx,
+                        elapsed,
+                        rms,
+                        config.LISTENING_SILENCE_RMS_THRESHOLD,
+                        "silent" if is_silent else "voiced",
+                        voiced_run,
+                        voiced_seen,
+                    )
+                chunk_idx += 1
 
                 trailing_silence = (
                     silence_started_at is not None

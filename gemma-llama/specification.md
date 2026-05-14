@@ -21,7 +21,8 @@ dense) that:
   translator, lab assistant) on top of generic text/classify/extract/
   summarize endpoints.
 - Supports **text, image, audio, and video** inputs through Gemma 4's
-  unified vision/audio projector (`mmproj-BF16.gguf`) shipped inside
+  unified vision/audio projector (default `mmproj-F16.gguf`, with
+  `mmproj-BF16.gguf` / `mmproj-F32.gguf` also available) shipped inside
   Unsloth's GGUF repos. Audio + video are gated to E2B/E4B (the only
   variants Google released audio adapters for).
 - Includes opt-in **Piper TTS** so any endpoint can also return audio.
@@ -49,7 +50,7 @@ Constraints this imposes:
 
 - All Docker images and Python wheels must work on `linux/arm64`.
 - llama.cpp must compile for aarch64 CPU (no CUDA, no Metal).
-- Default model is **E4B** (4B effective, Q4_K_M ≈ 2.5 GB). E2B is the
+- Default model is **E4B** (4B effective, Q4_0 ≈ 2.7 GB on disk). E2B is the
   smaller alternative; 26B-A4B and 31B configs ship but require a bigger
   host (`>= 32 GB` and `>= 48 GB` RAM respectively).
 - `THREADS=4` matches the Pi 5's 4 physical cores. `TTS_MAX_CONCURRENCY=2`
@@ -129,7 +130,7 @@ GGUF model + mmproj (./models volume)
 
 ## 5. Supported Models
 
-Default: **`gemma4-e4b.yaml`** (Gemma 4 E4B it, Q4_K_M).
+Default: **`gemma4-e4b.yaml`** (Gemma 4 E4B it, Q4_0 on Pi 5; switch to Q4_K_M on CUDA / Apple-silicon).
 
 | Config file | Display | Modalities | RAM | Notes |
 |-------------|---------|------------|-----|-------|
@@ -279,9 +280,11 @@ llama-server -m $MODEL_PATH \
 ```
 
 - `--jinja` is required so the Gemma chat template handles system + tools.
-- `--mmproj` is added when `MMPROJ_PATH` exists. The same
-  `mmproj-BF16.gguf` carries **both** vision and audio adapters, so a
-  single flag enables `/vision/*`, `/audio/*`, and `/video/*`.
+- `--mmproj` is added when `MMPROJ_PATH` exists. The same unified
+  Gemma 4 mmproj GGUF carries **both** vision and audio adapters, so a
+  single flag enables `/vision/*`, `/audio/*`, and `/video/*`. Default
+  precision is F16 (fastest on Pi 5 / consumer CPUs); BF16 and F32
+  builds are available in the same repo for hosts with native BF16.
 - `--no-mmproj-offload` is appended unless `MMPROJ_USE_GPU=true`
   (CPU-resident projector is the right default on Pi 5 / CPU-only Macs).
 
@@ -470,8 +473,8 @@ All settings come from environment variables (typically via `.env`; see
 | `API_PORT` | `8010` | Host port for FastAPI. |
 | `LOG_LEVEL` | `info` | Python logger level. |
 | `MODEL_CONFIG_PATH` | `model_configs/gemma4-e4b.yaml` | Active YAML config. |
-| `MODEL_REPO` / `MODEL_FILE` | `unsloth/gemma-4-E4B-it-GGUF` / `gemma-4-E4B-it-Q4_K_M.gguf` | HF source for the GGUF. |
-| `MMPROJ_REPO` / `MMPROJ_FILE` | same repo / `mmproj-BF16.gguf` | Unified vision+audio projector. Blank for text-only. |
+| `MODEL_REPO` / `MODEL_FILE` | `unsloth/gemma-4-E4B-it-GGUF` / `gemma-4-E4B-it-Q4_0.gguf` | HF source for the GGUF. Q4_0 default targets the Pi 5's repacked dotprod SGEMM path; switch to a K-quant on hosts with native i8mm or GPU. |
+| `MMPROJ_REPO` / `MMPROJ_FILE` | same repo / `mmproj-F16.gguf` | Unified vision+audio projector (F16 default; BF16 / F32 also in the same repo). Blank for text-only. |
 | `HF_TOKEN` | _unset_ | Required only for gated repos. |
 | `CONTEXT_SIZE` | `8192` | `llama-server -c`. |
 | `THREADS` | `4` | Pi 5 default; bump to physical core count on dev. |
@@ -576,7 +579,7 @@ API's `inference_time_ms`. Reports land in `eval/reports/` as
 - **Threads**: `THREADS` to physical core count (4 on Pi 5, 8+ on dev).
 - **Context size**: lower `CONTEXT_SIZE` reduces RAM; raise to `16384`
   for long audio (audio tokens are denser than text).
-- **Quantization**: `Q4_K_M` is the Pi 5 default; the per-config YAML
+- **Quantization**: `Q4_0` is the Pi 5 default (hits the repacked dotprod SGEMM kernel); switch to `Q4_K_M` on CUDA / Apple-silicon. The per-config YAML
   picks the file. Bigger quants improve quality at the cost of RAM.
 - **GPU offload**: `docker-compose.gpu.yml` flips `GGML_CUDA=ON`,
   `GPU_LAYERS=99`, `MMPROJ_USE_GPU=true`.

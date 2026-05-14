@@ -139,6 +139,14 @@ async def listen(
     audio: UploadFile = File(..., description="Recording of the student's question."),
     max_tokens: int | None = Form(None, ge=1, le=4096),
     temperature: float | None = Form(None, ge=0.0, le=2.0),
+    thinking: bool = Form(
+        False,
+        description=(
+            "If true, preserve and expose the model's chain-of-thought. "
+            "Default off for fastest responses; opt in for harder spoken "
+            "questions where reasoning helps."
+        ),
+    ),
     stream: bool = Form(False, description="Stream NDJSON tokens instead of waiting for the full response."),
     tts: bool = Form(False, description="If true, also render the answer via Piper TTS."),
     voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see GET /tts/voices)."),
@@ -174,7 +182,7 @@ async def listen(
             messages,
             max_tokens=resolved_max_tokens,
             temperature=resolved_temperature,
-            thinking=False,
+            thinking=thinking,
         )
         body = maybe_wrap_stream(
             upstream,
@@ -189,7 +197,7 @@ async def listen(
             messages,
             max_tokens=resolved_max_tokens,
             temperature=resolved_temperature,
-            thinking=False,
+            thinking=thinking,
         )
     except LlamaServerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

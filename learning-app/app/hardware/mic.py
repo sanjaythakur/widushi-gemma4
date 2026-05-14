@@ -6,8 +6,15 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+from app import config
+
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHUNK_MS = 80
+
+# Sentinel so callers can pass ``device=None`` to force PortAudio's
+# default and still distinguish that from "not specified, fall back to
+# ``config.MIC_INPUT_DEVICE``".
+_USE_CONFIG_DEFAULT: object = object()
 
 
 class MicSource:
@@ -16,12 +23,12 @@ class MicSource:
         *,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         chunk_ms: int = DEFAULT_CHUNK_MS,
-        device: int | str | None = None,
+        device: int | str | None | object = _USE_CONFIG_DEFAULT,
         stub: bool = True,
     ) -> None:
         self.sample_rate = sample_rate
         self.chunk_ms = chunk_ms
-        self.device = device
+        self.device = config.MIC_INPUT_DEVICE if device is _USE_CONFIG_DEFAULT else device
         self.stub = stub
         self._queue: asyncio.Queue[bytes] | None = None
 
@@ -84,6 +91,15 @@ class MicSource:
         self._queue = queue
         chunk_samples = int(self.sample_rate * self.chunk_ms / 1000)
         blocksize = chunk_samples
+
+        # Surface a clear log line so ALSA "no card" surprises are easy
+        # to debug. ``self.device is None`` means PortAudio default →
+        # ALSA ``default`` PCM (controlled by ``/etc/asound.conf``).
+        import logging  # noqa: PLC0415 - kept local; mic is rarely imported
+        logging.getLogger(__name__).info(
+            "mic input: device=%r sample_rate=%d chunk_ms=%d",
+            self.device, self.sample_rate, self.chunk_ms,
+        )
 
         def callback(
             indata: Any,

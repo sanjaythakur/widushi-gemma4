@@ -89,7 +89,11 @@ ENV MODEL_DIR=/models \
     CONTEXT_SIZE=8192 \
     THREADS=4 \
     GPU_LAYERS=0 \
-    MMPROJ_USE_GPU=false
+    MMPROJ_USE_GPU=false \
+    FLASH_ATTN=true \
+    CACHE_TYPE_K=q8_0 \
+    CACHE_TYPE_V=q8_0 \
+    MLOCK=true
 
 EXPOSE 8080
 
@@ -99,10 +103,19 @@ HEALTHCHECK --interval=15s --timeout=10s --start-period=3600s --retries=5 \
 # download_model.sh is idempotent: skips download if files exist.
 # `--jinja` ensures the Gemma chat template handles system messages and tools.
 # `--mmproj` is only added when MMPROJ_PATH points to an existing file. The
-# unified Gemma 4 mmproj-BF16.gguf carries BOTH the vision and audio adapters,
-# so this single flag enables /vision/*, /audio/*, and /video/* end-to-end.
+# unified Gemma 4 mmproj GGUF carries BOTH the vision and audio adapters, so
+# this single flag enables /vision/*, /audio/*, and /video/* end-to-end. The
+# repo ships F16 / BF16 / F32 builds; we default to F16 because Pi 5 has no
+# native BF16 (see .env.example for the full rationale).
 # `--no-mmproj-offload` keeps the projector resident on CPU when MMPROJ_USE_GPU
 # is anything other than "true" -- correct default for Pi 5 / CPU-only Macs.
+#
+# `-fa` (flash attention) plus `--cache-type-k/v q8_0` halves KV-cache memory
+# bandwidth, which is the dominant decode-time cost on Pi 5 (memory-bandwidth
+# bound, not compute bound). Typical win: 20-40% faster decode at 8k ctx with
+# no measurable quality loss. llama.cpp requires `-fa` whenever the V-cache is
+# anything other than f16, so we silently drop CACHE_TYPE_V back to the
+# default if FLASH_ATTN is disabled, rather than refusing to boot.
 #
 # IMPORTANT: leading `set -e` so a non-zero exit from download_model.sh aborts
 # the container immediately (otherwise `;` separators below would fall through
@@ -118,6 +131,29 @@ CMD ["/bin/bash", "-eo", "pipefail", "-c", "\
             *) MMPROJ_FLAG=\"$MMPROJ_FLAG --no-mmproj-offload\" ;; \
         esac; \
     fi; \
+    FLASH_ATTN_LC=$(printf '%s' \"$FLASH_ATTN\" | tr '[:upper:]' '[:lower:]'); \
+    FA_ON=0; \
+    FA_FLAG=''; \
+    case \"$FLASH_ATTN_LC\" in \
+        true|1|yes|on) FA_FLAG='--flash-attn on'; FA_ON=1 ;; \
+        false|0|no|off) FA_FLAG='--flash-attn off' ;; \
+        auto|'') FA_FLAG='--flash-attn auto' ;; \
+        *) FA_FLAG=\"--flash-attn $FLASH_ATTN_LC\" ;; \
+    esac; \
+    KV_FLAGS=''; \
+    if [ -n \"$CACHE_TYPE_K\" ]; then \
+        KV_FLAGS=\"--cache-type-k $CACHE_TYPE_K\"; \
+    fi; \
+    if [ \"$FA_ON\" = '1' ] && [ -n \"$CACHE_TYPE_V\" ]; then \
+        KV_FLAGS=\"$KV_FLAGS --cache-type-v $CACHE_TYPE_V\"; \
+    elif [ \"$FA_ON\" != '1' ] && [ -n \"$CACHE_TYPE_V\" ] && [ \"$CACHE_TYPE_V\" != \"f16\" ]; then \
+        echo \"[llama] FLASH_ATTN is not 'on'; ignoring CACHE_TYPE_V=$CACHE_TYPE_V (llama.cpp requires -fa on for non-f16 V-cache).\" 1>&2; \
+    fi; \
+    MLOCK_LC=$(printf '%s' \"$MLOCK\" | tr '[:upper:]' '[:lower:]'); \
+    MLOCK_FLAG=''; \
+    case \"$MLOCK_LC\" in \
+        true|1|yes|on) MLOCK_FLAG='--mlock' ;; \
+    esac; \
     exec llama-server \
         -m \"$MODEL_PATH\" \
         $MMPROJ_FLAG \
@@ -126,5 +162,8 @@ CMD ["/bin/bash", "-eo", "pipefail", "-c", "\
         -c \"$CONTEXT_SIZE\" \
         -t \"$THREADS\" \
         -ngl \"$GPU_LAYERS\" \
+        $FA_FLAG \
+        $KV_FLAGS \
+        $MLOCK_FLAG \
         --jinja \
 "]

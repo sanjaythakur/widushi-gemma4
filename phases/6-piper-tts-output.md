@@ -2,11 +2,17 @@
 
 ## Goal
 
-Use the existing Piper TTS support in the Gemma service at `http://localhost:8010` so a full wake-word turn produces both tutor text and spoken WAV output. After `LISTENING`, the FSM should stay in `THINKING` while `/audio/listen` processes the recorded question and renders TTS. Only after both text and audio are ready should the app enter `SPEAKING`, play the WAV, then return to `IDLE`.
+Use the existing Piper TTS support in the Gemma service so a full
+wake-word turn produces both tutor text and spoken WAV output. The FSM
+should stay in `THINKING` while `/audio/listen` processes the recorded
+question **and** renders TTS. Only after both text and audio are ready
+should the app enter `SPEAKING`, play the WAV, then return to
+`LISTENING` for the follow-up turn.
 
-## Gemma Service Contract
+## Gemma Service Contract (no service changes required)
 
-No `gemma-llama` code changes are required. The learning app should use the existing non-streaming audio endpoint:
+The phase-1 Gemma service already returns Piper output from the same
+endpoint phase 5 uses:
 
 - `POST /audio/listen`
 - `Content-Type: multipart/form-data`
@@ -14,87 +20,96 @@ No `gemma-llama` code changes are required. The learning app should use the exis
 - form fields:
   - `stream=false`
   - `tts=true`
-  - `voice=<configured voice>`, default `warm-academic`
-- expected JSON fields:
-  - `text`
-  - `audio_url`
-  - `audio_duration_ms`
-  - `voice`
-  - optional `audio_error`
+  - `voice=<configured voice>` (default `warm-academic`)
+- expected JSON fields: `text`, `audio_url`, `audio_duration_ms`,
+  `voice`, optional `audio_error`.
 
-Resolve `audio_url` against `GEMMA_URL`, then fetch the WAV bytes with `GET <audio_url>`. Treat `audio_error` or a missing `audio_url` as a failed turn and cancel back to `IDLE`.
+Resolve `audio_url` against `GEMMA_URL` (`urllib.parse.urljoin`), then
+`GET <audio_url>` for the WAV bytes. Treat `audio_error` or a missing
+`audio_url` as a failed turn and `CANCEL`.
 
-`POST /tts/speak` is not needed for the main wake-word flow because `/audio/listen` can already return the answer text and Piper output in one request. It can remain a future utility for arbitrary text-only speech.
+`POST /tts/speak` exists as a future utility for arbitrary text-only
+speech but is not used in the wake-word flow.
 
 ## Functional Requirements
 
-- Preserve FSM ownership in `learning-app/app/orchestrator/fsm.py`.
-- Keep the transition shape:
-  - `IDLE + WAKE_DETECTED -> LISTENING`
-  - `LISTENING + UTTERANCE_END -> THINKING`
-  - `THINKING + REPLY_READY -> SPEAKING`
-  - `SPEAKING + PLAYBACK_DONE -> LISTENING` (so the user can ask a follow-up without re-saying "Widushi"; the silence timeout in `LISTENING` falls back to `IDLE` via `CANCEL` if no follow-up arrives)
-- In the THINKING side effect:
-  - use audio payloads with a TTS-aware Gemma client method;
-  - call `/audio/listen` with `tts=true`;
+- Preserve the FSM table from phase 3.
+- In the `THINKING` side effect:
+  - call the TTS-aware Gemma method with the recorded `audio_bytes`;
   - fetch the returned WAV before posting `REPLY_READY`;
-  - post `REPLY_READY` with `text`, `audio_bytes`, `audio_duration_ms`, and `voice`.
-- Preserve a text prompt fallback for manual/API tests by calling `/generate` with `tts=true` and fetching its returned `audio_url`.
-- In the SPEAKING side effect:
-  - do not synthesize text locally;
+  - post `REPLY_READY` with `{"text", "audio_bytes",
+    "audio_duration_ms", "voice"}`.
+- Text-prompt fallback (manual / API events) calls `POST /generate` with
+  `tts=true` and fetches its `audio_url` the same way.
+- In the `SPEAKING` side effect:
+  - **do not** synthesize text locally;
   - play the prepared `audio_bytes`;
   - emit `PLAYBACK_DONE` only after playback finishes.
-- On Gemma, TTS, audio fetch, or playback failures, log the exception and emit `CANCEL`.
+- On Gemma failure, TTS failure, audio fetch failure, or playback
+  failure: log the exception and emit `CANCEL`.
+- Phase 7 plays acknowledgement clips concurrently with the Gemma
+  request; `_thinking_side_effect` must wait for **both** the Gemma
+  reply and the in-flight clip task before posting `REPLY_READY` so the
+  reply audio doesn't talk over the clip.
 
 ## Configuration
 
-Add environment-backed settings in `learning-app/app/config.py`:
+Env-backed in `learning-app/app/config.py`:
 
 - `GEMMA_TTS_ENABLED`, default `true`
 - `GEMMA_TTS_VOICE`, default `warm-academic`
 
-Existing settings still apply:
+Existing `GEMMA_URL` and `GEMMA_TIMEOUT_S` from phase 5 still apply.
 
-- `GEMMA_URL`, default `http://localhost:8010`
-- `GEMMA_TIMEOUT_S`, default `120`
+## Implementation Notes
 
-## Key Implementation Notes
+- Add a small reply data object in `learning-app/app/services/gemma.py`:
 
-- Add a small reply data object in `learning-app/app/services/gemma.py`, for example:
+  ```python
+  @dataclass(frozen=True)
+  class GemmaReply:
+      text: str
+      audio_bytes: bytes | None = None
+      audio_duration_ms: float | None = None
+      voice: str | None = None
+  ```
 
-```python
-GemmaReply(
-    text: str,
-    audio_bytes: bytes | None,
-    audio_duration_ms: float | None,
-    voice: str | None,
-)
-```
-
-- Add TTS-aware Gemma methods:
-  - `listen_audio_with_tts(audio_bytes, filename, content_type) -> GemmaReply`
+- Add TTS-aware methods on `GemmaClient`:
+  - `listen_audio_with_tts(audio_bytes, *, filename, content_type) -> GemmaReply`
   - `complete_with_tts(prompt) -> GemmaReply`
-- Keep older text-only methods if existing tests or debug tooling still use them.
-- Implement URL resolution with a structured URL helper such as `urllib.parse.urljoin`.
-- Keep `learning-app/app/services/piper.py` as the SPEAKING playback facade, but make it play already-rendered WAV bytes with `pygame.mixer.Sound(file=io.BytesIO(wav_bytes))`.
-- Stub services should return valid WAV bytes and use deterministic short waits so unit tests do not require Gemma, Piper, or speakers.
-- Stop active playback during cancellation or application shutdown when possible.
+- Keep older text-only methods for any debug tooling.
+- `learning-app/app/services/piper.py` is the playback facade for
+  already-rendered WAVs:
+
+  ```python
+  pygame.mixer.Sound(file=io.BytesIO(wav_bytes)).play()
+  ```
+
+  with an `await asyncio.to_thread(...)` wait loop so the SPEAKING side
+  effect can be cancelled cleanly. `aclose()` stops any active channel
+  during shutdown / `CANCEL`.
+- Stub services must return valid WAV bytes (e.g. 0.5 s of silence) and
+  use deterministic short waits so unit tests don't need Gemma, Piper,
+  or speakers.
 
 ## Tests
 
-Add focused tests that do not require a running Gemma service:
+`learning-app/tests/test_gemma.py` and additions to `test_fsm.py`. None
+of these may need a running Gemma service:
 
-- Gemma client posts multipart audio to `/audio/listen` with `stream=false`, `tts=true`, and the configured `voice`.
+- Gemma client posts multipart audio to `/audio/listen` with
+  `stream=false`, `tts=true`, and the configured `voice`.
 - Gemma client resolves and fetches a relative `audio_url`.
-- Gemma client raises on `audio_error` or missing `audio_url`.
-- Text fallback posts `/generate` with `tts=true` and fetches its audio URL.
-- FSM audio path uses the TTS-aware Gemma method and emits `REPLY_READY` containing both text and WAV bytes.
-- SPEAKING passes existing WAV bytes to the playback facade and emits `PLAYBACK_DONE` after playback returns.
-- TTS or playback failure emits `CANCEL` and returns the FSM to `IDLE`.
+- Gemma client raises on `audio_error` or a missing `audio_url`.
+- Text-fallback `complete_with_tts` posts `/generate` with `tts=true`
+  and fetches the returned audio.
+- FSM audio path uses the TTS-aware method and emits `REPLY_READY`
+  containing both text and WAV bytes.
+- `SPEAKING` passes the WAV bytes to the playback facade and emits
+  `PLAYBACK_DONE` only after playback returns.
+- TTS or playback failure emits `CANCEL` and lands the FSM in `IDLE`.
 
 ## Validation
-
-From the workspace root:
 
 ```bash
 make -C learning-app lint
@@ -103,15 +118,18 @@ make -C learning-app test
 
 Manual smoke test:
 
-1. Start the Gemma service and confirm `/health` reports `tts_ready=true`.
-2. Start the learning app.
-3. Say "Widushi".
-4. Ask a short spoken question.
-5. Confirm the state sequence is `LISTENING -> THINKING -> SPEAKING -> LISTENING`, then either a follow-up turn or a `LISTENING -> IDLE` silence-timeout fallback.
-6. Confirm THINKING covers LLM plus Piper generation time, and SPEAKING covers actual audio playback time.
+1. Start the Gemma service; confirm `/health` reports `tts_ready=true`.
+2. `make -C learning-app run`.
+3. Say "Widushi", ask a short spoken question.
+4. Confirm the state sequence is
+   `LISTENING → THINKING → SPEAKING → LISTENING`, then either a
+   follow-up turn or a `LISTENING → IDLE` silence-timeout fallback.
+5. Confirm `THINKING` covers LLM + Piper render time and `SPEAKING`
+   covers actual audio playback time.
 
 ## Non-Goals
 
-- Do not implement local Piper subprocess synthesis in the learning app.
-- Do not switch to streaming NDJSON TTS in this phase.
-- Do not modify `gemma-llama` unless the deployed service lacks the documented `/audio/listen` TTS fields.
+- No local Piper subprocess synthesis in the learning app.
+- No streaming NDJSON TTS in this phase.
+- No `gemma-llama` changes unless the deployed service is missing the
+  documented `/audio/listen` TTS fields.

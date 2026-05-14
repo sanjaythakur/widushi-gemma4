@@ -35,6 +35,14 @@ async def explain_work(
     subject: str | None = Form(None, description="Optional subject hint, e.g. 'algebra'."),
     max_tokens: int | None = Form(None, ge=1, le=4096),
     temperature: float | None = Form(None, ge=0.0, le=2.0),
+    thinking: bool = Form(
+        False,
+        description=(
+            "If true, preserve and expose the model's chain-of-thought. "
+            "Default off because reasoning roughly doubles the decoded "
+            "token count on Pi 5 for the same final feedback."
+        ),
+    ),
     tts: bool = Form(False, description="If true, also render the response via Piper TTS."),
     voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see GET /tts/voices)."),
     adapter: LlamaAdapter = Depends(get_adapter),
@@ -70,7 +78,7 @@ async def explain_work(
             messages,
             max_tokens=max_tokens or cfg.defaults.max_tokens,
             temperature=temperature if temperature is not None else cfg.defaults.temperature,
-            thinking=cfg.defaults.thinking,
+            thinking=thinking,
         )
     except LlamaServerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

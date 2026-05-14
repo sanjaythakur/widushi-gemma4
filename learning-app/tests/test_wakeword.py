@@ -100,6 +100,82 @@ async def test_wakeword_source_emits_wake_detected_above_threshold(
 
 
 @pytest.mark.asyncio
+async def test_wakeword_source_skips_detection_when_fsm_not_idle(
+    tmp_path: Path,
+) -> None:
+    """While the FSM is mid-turn (THINKING/SPEAKING), the wake-word
+    source must not predict on incoming mic frames. Otherwise the
+    user's continued talking — or pure background noise above the
+    detector threshold — re-fires WAKE_DETECTED, which the FSM silently
+    ignores while the source still plays ``listen_start`` and starts a
+    15 s phantom recording whose UTTERANCE_END is also dropped.
+    """
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    # If the gate fails, every chunk would fire WAKE_DETECTED at score
+    # 0.99. The test asserts neither the event nor any detector call
+    # ever occurs while the state stays in THINKING.
+    detector = FakeDetector([{"vDu_shee": 0.99}] * 3)
+    source = WakeWordSource(
+        queue,
+        mic=FakeMic([b"\x00" * OPENWAKEWORD_FRAME_BYTES] * 3),  # type: ignore[arg-type]
+        model_path=_model_file(tmp_path),
+        enabled=True,
+        threshold=0.5,
+        debounce_s=0,
+        detector_factory=lambda _: detector,
+        state_getter=lambda: AppState.THINKING,
+    )
+
+    await _run_source(source)
+
+    assert queue.empty(), "no events should be emitted while FSM is non-IDLE"
+    assert detector.frames_seen == 0, (
+        "detector must not be invoked while FSM is non-IDLE"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wakeword_source_resumes_detection_when_fsm_returns_to_idle(
+    tmp_path: Path,
+) -> None:
+    """The gate is re-checked every chunk, so once the FSM lands back in
+    IDLE the next chunk must be predicted on and a high score must fire
+    WAKE_DETECTED normally."""
+
+    queue: asyncio.Queue[Event] = asyncio.Queue()
+    # First chunk is gated (state=THINKING). Second chunk is not (state
+    # transitions back to IDLE) and carries the high score.
+    detector = FakeDetector([{"vDu_shee": 0.95}])
+    state_seq = iter([AppState.THINKING, AppState.IDLE, AppState.IDLE])
+
+    def next_state() -> AppState:
+        try:
+            return next(state_seq)
+        except StopIteration:
+            return AppState.IDLE
+
+    source = WakeWordSource(
+        queue,
+        mic=FakeMic([b"\x00" * OPENWAKEWORD_FRAME_BYTES] * 2),  # type: ignore[arg-type]
+        model_path=_model_file(tmp_path),
+        enabled=True,
+        threshold=0.5,
+        debounce_s=0,
+        detector_factory=lambda _: detector,
+        state_getter=next_state,
+    )
+
+    await _run_source(source)
+
+    event = await asyncio.wait_for(queue.get(), timeout=1)
+    assert event.type is EventType.WAKE_DETECTED
+    assert detector.frames_seen == 1, (
+        "detector should only see the chunk that arrived while FSM was IDLE"
+    )
+
+
+@pytest.mark.asyncio
 async def test_wakeword_source_debounces_repeated_detections(
     tmp_path: Path,
 ) -> None:

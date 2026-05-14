@@ -22,6 +22,7 @@ from typing import Any
 import pygame
 
 from app import config
+from app.hardware.audio import init_pygame_mixer
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ class ClipPlayer:
 
     def _ensure_mixer(self) -> None:
         if not pygame.mixer.get_init():
-            pygame.mixer.init()
+            init_pygame_mixer()
 
 
 def _wait_for_channel(channel: Any) -> None:

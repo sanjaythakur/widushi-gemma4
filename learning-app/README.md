@@ -153,13 +153,37 @@ LISTENING_MAX_RECORDING_S=15.0
 LISTENING_SILENCE_TIMEOUT_S=5.0
 ```
 
-If the app still thinks silence is speech, measure the local mic noise floor:
-temporarily log `_pcm16_rms(prepared)` inside `_record_utterance`, then watch a
-few seconds of quiet-room chunks and a few normal spoken chunks. Set
+If the app still thinks silence is speech (typical symptom: every recording
+runs to exactly `LISTENING_MAX_RECORDING_S` because trailing-silence never
+fires), measure the local mic noise floor with the built-in calibration log:
+
+```bash
+WIDUSHI_RMS_DEBUG=1 make run
+```
+
+While set, every 80 ms recorder chunk is logged at INFO as
+
+```text
+INFO app.input.wakeword: rms[042] t=3.36s rms=124 thr=800 silent run=0 seen=True
+```
+
+Say "Widushi", stay quiet for a couple of seconds, then speak normally for a
+few seconds, then stay quiet again. Read the `rms=` column: pick a
 `LISTENING_SILENCE_RMS_THRESHOLD` comfortably above the quiet-room peaks but
-below soft speech; increase `LISTENING_VOICE_ONSET_FRAMES` to `3` if isolated
-blips still sneak through, or increase `LISTENING_TRAILING_SILENCE_S` to `2.0`
-if natural pauses still cut utterances short.
+below soft speech, then unset `WIDUSHI_RMS_DEBUG` so the per-chunk log goes
+away. Bump `LISTENING_VOICE_ONSET_FRAMES` to `3` if isolated blips still sneak
+through, or bump `LISTENING_TRAILING_SILENCE_S` to `2.0` if natural pauses cut
+utterances short. The threshold is mic-specific, so re-run this whenever you
+change the input device (USB mic swap, room change, AC on/off).
+
+The wake-word source is FSM-aware: it only predicts on incoming mic frames
+while the orchestrator is in `IDLE`. While the FSM is in `THINKING` or
+`SPEAKING`, mic chunks are dropped and the wake-word frame buffer is cleared,
+so background noise (or the user's continued talking) cannot fire
+`WAKE_DETECTED` and start a phantom 15 s recording whose `UTTERANCE_END` the
+FSM would silently ignore. Follow-up listens still work because they're armed
+explicitly via the follow-up signal raised by `_followup_listen_side_effect`,
+which is checked before the IDLE gate.
 
 ## Pre-generated Acknowledgement Clips
 
@@ -246,30 +270,117 @@ make stop-docker
 
 ## Raspberry Pi 5 deploy
 
-Build the image on the Pi (or push a multi-arch image) and run with
-the framebuffer driver against the TFT plus host audio:
+The reference Pi setup is a Pi 5 with an MHS35 3.5" SPI TFT (480×320,
+ILI9486) driven by the kernel's `fbtft` stack, plus a USB mic and USB
+speaker. There are two non-obvious bits worth knowing before the run
+command makes sense:
+
+- **Display.** SDL2 has no `fbcon`/`fbdev` driver, and `fbtft` panels
+  do not expose `/dev/dri`, so `KMSDRM` is also out. Instead the app
+  renders into an off-screen surface (`SDL_VIDEODRIVER=dummy`) and
+  `app/hardware/fb_sink.py` copies each frame straight into `/dev/fb0`
+  as packed RGB565. Set `WIDUSHI_FB_DEVICE=/dev/fb0` to enable the
+  sink; leave it unset on Mac/dev and pygame's normal flip path runs.
+  The MHS35 overlay needs `:rotate=90` (or `:rotate=270`) in
+  `/boot/firmware/config.txt` so the framebuffer reports `480×320`
+  matching `config.SCREEN_SIZE`.
+- **Audio.** The Pi 5 has no on-board analog audio, so a USB audio
+  device (or HDMI sink, or I2S DAC HAT) is required. With a USB mic
+  and USB speaker plugged in, ALSA typically splits them across two
+  cards:
+
+  ```text
+  $ aplay -l
+  card 1: UACDemoV10 [UACDemoV1.0], device 0: USB Audio
+  $ arecord -l
+  card 0: Device [USB PnP Sound Device], device 0: USB Audio
+  ```
+
+  The default ALSA `default` PCM points at `hw:0,0`, which here is
+  the capture-only mic — opening it for playback fails. The image
+  ships [`docker/asound.conf`](docker/asound.conf) baked into
+  `/etc/asound.conf` to fix this: it pins `default` capture to the
+  USB mic (card 0) and `default` playback to the USB speaker
+  (card 1). pygame's mixer and `sounddevice` both honour `default`,
+  so no per-app device IDs are required when the cards line up.
+
+  If your Pi enumerates the USB devices in a different order, either
+  edit `docker/asound.conf` and rebuild, or override at runtime via:
+
+  ```bash
+  -e WIDUSHI_INPUT_DEVICE='USB PnP'    # mic, sounddevice substring
+                                       # match (or an integer index)
+  -e WIDUSHI_OUTPUT_DEVICE='UACDemoV1' # speaker, SDL device name
+  -e SDL_AUDIODEV=plughw:1,0           # SDL/pygame ALSA fallback
+  ```
+
+  You can also drop the bundled `asound.conf` onto the *host* with
+  `make install-asound`, which is handy if you want host-side tools
+  (`aplay`, `arecord`, `speaker-test`) to follow the same routing.
+
+Build and run:
 
 ```bash
 # Run from the workspace root so Docker can package openwakeword/.
 docker build -t widushi-app -f learning-app/docker/Dockerfile.app .
+
+# Run from the workspace root so the clip bind-mount path resolves.
 docker run --rm \
+  --network host \
   --device /dev/fb0 --device /dev/snd \
-  -e SDL_VIDEODRIVER=fbcon \
+  --group-add audio \
+  -e SDL_VIDEODRIVER=dummy \
   -e SDL_AUDIODRIVER=alsa \
-  -p 8020:8020 \
+  -e WIDUSHI_FB_DEVICE=/dev/fb0 \
+  -e GEMMA_URL=http://localhost:8010 \
+  -e LISTENING_SILENCE_RMS_THRESHOLD=2500 \
+  -e LISTENING_VOICE_ONSET_FRAMES=3 \ 
+  -e WIDUSHI_RMS_DEBUG=1 \
+  -v "$PWD/pre-generated-clips/clips:/pre-generated-clips/clips:ro" \
   widushi-app
 ```
 
-The image expects the Gemma service at `GEMMA_URL` (default
-`http://localhost:8010`) and posts spoken questions to `/audio/listen` with
-`tts=true`.
-Wire it via `--network host` or set `GEMMA_URL` to point at the right hostname.
-The image copies
-`openwakeword/` into `/openwakeword` and sets
-`WAKE_WORD_MODEL=/openwakeword/vDu_shee.onnx`.
-It also downloads openWakeWord's shared runtime models, including
-`melspectrogram.onnx`, during the Docker build so wake-word detection does not
-need network access on first boot.
+Two things to know about that command:
+
+- **Networking.** The Gemma stack (`gemma-llama-api`) publishes port `8010`
+  on the host. Inside a bridged container `localhost` would point at the
+  container itself, so `GEMMA_URL=http://localhost:8010` (the image default)
+  fails with `httpx.ConnectError: All connection attempts failed`.
+  `--network host` puts the app on the host's network namespace so
+  `localhost:8010` resolves to the Gemma container's published port. With
+  `--network host` the `-p 8020:8020` flag is redundant (Docker prints a
+  warning) so it is dropped. If you'd rather keep bridge networking, swap
+  `--network host` for `--add-host=host.docker.internal:host-gateway` and
+  set `-e GEMMA_URL=http://host.docker.internal:8010` — that's what
+  `learning-app/docker/docker-compose.yml` does for Mac dev.
+- **Clip mount.** `ClipPlayer` resolves clips to
+  `/pre-generated-clips/clips/<lang>/<id>.wav` (see `config.CLIPS_DIR`),
+  but the image does not bake the clip set in. Without the bind-mount you
+  get `clip not found: /pre-generated-clips/clips/en/listen_start.wav;
+  skipping playback` warnings on every wake-word turn. Mounting the
+  sibling [`../pre-generated-clips/clips/`](../pre-generated-clips/clips/)
+  directory read-only at the same path makes `listen_start`,
+  `wait_thinking`, and `wait_checking` audible.
+
+Verify each subsystem on its own first; this saves a lot of time:
+
+```bash
+# Display: panel should briefly flash and then go black
+cat /dev/urandom > /dev/fb0; sleep 0.5; dd if=/dev/zero of=/dev/fb0 bs=1M count=1
+
+# Speaker (uses the asound.conf default = USB speaker)
+speaker-test -c2 -twav
+
+# Mic
+arecord -d 3 -fS16_LE -r16000 -c1 /tmp/mic.wav
+aplay /tmp/mic.wav
+```
+
+The image copies `openwakeword/` into `/openwakeword` and sets
+`WAKE_WORD_MODEL=/openwakeword/vDu_shee.onnx`. It also downloads
+openWakeWord's shared runtime models (including `melspectrogram.onnx`)
+during the Docker build so wake-word detection does not need network
+access on first boot.
 
 ## Development workflow
 
@@ -308,5 +419,4 @@ tests/
 
 - SQLite persistence on disk.
 - USB camera capture and image pipelines.
-- Pi framebuffer auto-detection helpers.
 - Streaming partial Gemma responses.

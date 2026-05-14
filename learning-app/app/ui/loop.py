@@ -23,6 +23,7 @@ import pygame
 
 from app import config
 from app.events import Event, EventType
+from app.hardware.fb_sink import FbSink
 from app.orchestrator import Orchestrator
 from app.ui.faces import build_face_registry
 
@@ -35,10 +36,12 @@ class UILoop:
         screen: pygame.Surface,
         orchestrator: Orchestrator,
         key_events: asyncio.Queue[int],
+        fb_sink: FbSink | None = None,
     ) -> None:
         self._screen = screen
         self._orchestrator = orchestrator
         self._key_events = key_events
+        self._fb_sink = fb_sink
         self._faces = build_face_registry()
         self._last_tick: float | None = None
         self._stop = False
@@ -80,3 +83,10 @@ class UILoop:
         face.update(dt)
         face.draw(self._screen)
         pygame.display.flip()
+
+        # When SDL is rendering to a real window (cocoa/x11) ``flip``
+        # is what shows the frame. With ``SDL_VIDEODRIVER=dummy`` on the
+        # Pi the flip is a no-op, so we additionally push the surface
+        # into ``/dev/fb0`` ourselves — that's how the SPI TFT lights up.
+        if self._fb_sink is not None:
+            self._fb_sink.push(self._screen)

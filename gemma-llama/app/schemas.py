@@ -60,7 +60,13 @@ class GenerateRequest(TTSOptions):
     )
     max_tokens: int | None = Field(default=None, ge=1, le=8192)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    thinking: bool = True
+    # Default off: chain-of-thought generation roughly doubles the decoded
+    # token count on Pi 5 for the same final answer. Opt back in per-request
+    # for harder questions where reasoning helps quality.
+    thinking: bool = Field(
+        default=False,
+        description="If true, preserve and expose the model's chain-of-thought.",
+    )
     stream: bool = False
 
 
@@ -90,7 +96,10 @@ class ChatRequest(TTSOptions):
     messages: list[ChatMessage] = Field(..., min_length=1)
     max_tokens: int | None = Field(default=None, ge=1, le=8192)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    thinking: bool = True
+    thinking: bool = Field(
+        default=False,
+        description="If true, preserve and expose the model's chain-of-thought.",
+    )
     stream: bool = False
 
 
@@ -105,7 +114,10 @@ class ClassifyRequest(TTSOptions):
     multi_label: bool = False
     max_tokens: int | None = Field(default=None, ge=1, le=2048)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    thinking: bool = True
+    thinking: bool = Field(
+        default=False,
+        description="If true, preserve and expose the model's chain-of-thought.",
+    )
 
 
 class ClassifyResponse(BaseModel):
@@ -137,7 +149,10 @@ class ExtractRequest(TTSOptions):
     )
     max_tokens: int | None = Field(default=None, ge=1, le=4096)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    thinking: bool = True
+    thinking: bool = Field(
+        default=False,
+        description="If true, preserve and expose the model's chain-of-thought.",
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -166,7 +181,10 @@ class SummarizeRequest(TTSOptions):
     max_sentences: int = Field(default=3, ge=1, le=20)
     max_tokens: int | None = Field(default=None, ge=1, le=4096)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    thinking: bool = True
+    thinking: bool = Field(
+        default=False,
+        description="If true, preserve and expose the model's chain-of-thought.",
+    )
 
 
 class SummarizeResponse(BaseModel):

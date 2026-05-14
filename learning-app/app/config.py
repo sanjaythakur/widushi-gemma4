@@ -101,7 +101,50 @@ LISTENING_MAX_RECORDING_S: float = float(os.environ.get("LISTENING_MAX_RECORDING
 LISTENING_SILENCE_TIMEOUT_S: float = float(
     os.environ.get("LISTENING_SILENCE_TIMEOUT_S", "5.0")
 )
+# One-shot calibration aid for the silence/voice gate. When set,
+# ``_record_utterance`` logs the per-chunk RMS at INFO so you can read
+# the actual quiet-room noise floor and a few peaks of normal speech,
+# then pick a ``LISTENING_SILENCE_RMS_THRESHOLD`` comfortably between
+# the two for the current mic. Leave unset in normal runs — every
+# 80 ms chunk produces a log line.
+LISTENING_RMS_DEBUG: bool = _env_bool("WIDUSHI_RMS_DEBUG", default=False)
 
 # Audio format used end-to-end (matches the pre-generated clips).
 AUDIO_SAMPLE_RATE: int = 22050
 AUDIO_CHANNELS: int = 1
+
+
+def _parse_audio_device(raw: str | None) -> int | str | None:
+    """Coerce ``WIDUSHI_INPUT_DEVICE`` into a sounddevice ``device=`` value.
+
+    sounddevice accepts an integer index, a substring of the device
+    name, or ``None`` (PortAudio default). We map an empty/unset env
+    var to ``None`` so the system follows whatever ALSA's ``default``
+    PCM resolves to (typically what ``/etc/asound.conf`` pins).
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw.lstrip("-").isdigit():
+        return int(raw)
+    return raw
+
+
+# Mic capture device for sounddevice. Leave unset to follow the ALSA
+# ``default`` capture PCM (recommended once ``asound.conf`` is in place
+# on the Pi). Set to e.g. ``"USB PnP"`` or an integer index from
+# ``python -m sounddevice`` to override.
+MIC_INPUT_DEVICE: int | str | None = _parse_audio_device(
+    os.environ.get("WIDUSHI_INPUT_DEVICE")
+)
+
+# Optional pygame.mixer device override. Pygame forwards this to SDL2's
+# ``SDL_OpenAudioDevice``, so the value must be an SDL device name
+# (e.g. ``"USB Audio Device"`` as listed by SDL). Leave unset to follow
+# ``SDL_AUDIODEV`` / ALSA defaults — preferred when ``asound.conf`` is
+# pinned — and only set if the chosen ``SDL_AUDIODEV`` doesn't take.
+AUDIO_OUTPUT_DEVICE: str | None = (
+    os.environ.get("WIDUSHI_OUTPUT_DEVICE", "").strip() or None
+)

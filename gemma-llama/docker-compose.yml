@@ -24,12 +24,18 @@ services:
       MODEL_PATH: /models/model.gguf
       MMPROJ_PATH: /models/mmproj.gguf
       MODEL_REPO: ${MODEL_REPO:-unsloth/gemma-4-E4B-it-GGUF}
-      MODEL_FILE: ${MODEL_FILE:-gemma-4-E4B-it-Q4_K_M.gguf}
+      # Default to Q4_0 because llama.cpp's repacked dotprod SGEMM kernel
+      # is the fastest matmul path on Pi 5 / Cortex-A76. Override to a
+      # K-quant (e.g. Q4_K_M) on CUDA / Apple-silicon hosts.
+      MODEL_FILE: ${MODEL_FILE:-gemma-4-E4B-it-Q4_0.gguf}
       # MMPROJ_* default to the official Google projector that ships inside
       # the Gemma 4 E4B GGUF repo (April 2026 release). Override with empty
       # strings if you want a text-only deployment.
       MMPROJ_REPO: ${MMPROJ_REPO:-unsloth/gemma-4-E4B-it-GGUF}
-      MMPROJ_FILE: ${MMPROJ_FILE:-mmproj-BF16.gguf}
+      # Default to F16 because Pi 5 / consumer CPUs have native FP16 but no
+      # native BF16; the BF16 build up-converts to FP32 in software there.
+      # Override to mmproj-BF16.gguf on CUDA / Apple-silicon hosts.
+      MMPROJ_FILE: ${MMPROJ_FILE:-mmproj-F16.gguf}
       # On Pi 5 / CPU-only Macs we keep the projector resident on CPU. The
       # GPU compose override flips this to "true" alongside GPU_LAYERS=99.
       MMPROJ_USE_GPU: ${MMPROJ_USE_GPU:-false}
@@ -39,6 +45,23 @@ services:
       CONTEXT_SIZE: ${CONTEXT_SIZE:-8192}
       THREADS: ${THREADS:-4}
       GPU_LAYERS: ${GPU_LAYERS:-0}
+      # Decode-speed knobs (Pi 5 is memory-bandwidth bound). `-fa` enables
+      # flash attention; q8_0 K/V cache halves KV-cache bandwidth with no
+      # measurable quality loss. Setting FLASH_ATTN=false also forces the
+      # V-cache back to the default to keep llama.cpp happy.
+      FLASH_ATTN: ${FLASH_ATTN:-true}
+      CACHE_TYPE_K: ${CACHE_TYPE_K:-q8_0}
+      CACHE_TYPE_V: ${CACHE_TYPE_V:-q8_0}
+      # mlock pins model weights in RAM so a memory-pressure spike (e.g. ffmpeg
+      # decoding a video) cannot page them out under us. Pi 5 has 16 GB; the
+      # weights are ~3 GB; safe and improves tail latency.
+      MLOCK: ${MLOCK:-true}
+    # MLOCK=true requires an unlimited RLIMIT_MEMLOCK inside the container;
+    # the Docker daemon defaults are too small for a 4-5 GB GGUF on most
+    # hosts. Setting -1 = unlimited unblocks llama-server's mlock(2) call.
+    # Drop this if you set MLOCK=false.
+    ulimits:
+      memlock: -1
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 15s

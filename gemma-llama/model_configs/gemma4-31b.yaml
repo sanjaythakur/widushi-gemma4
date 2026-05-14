@@ -24,7 +24,8 @@ modalities:
 defaults:
   max_tokens: 1024
   temperature: 0.7
-  thinking: true
+  # Off by default; opt in via the per-endpoint `thinking` parameter.
+  thinking: false
 
 prompts:
   classify: |

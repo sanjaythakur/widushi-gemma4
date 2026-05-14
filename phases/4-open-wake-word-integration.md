@@ -2,160 +2,160 @@
 
 ## Goal
 
-Integrate the custom OpenWakeWord model for "Widushi" into the learning app so that, while the app is in `IDLE`, hearing the wake word emits `WAKE_DETECTED` and moves the FSM to `LISTENING`.
+Integrate the custom OpenWakeWord model for "Widushi" into the learning
+app so that, while the FSM is in `IDLE`, hearing the wake word emits
+`WAKE_DETECTED` and moves the FSM to `LISTENING`. While the FSM is in
+any non-IDLE state, wake-word detection must be paused.
 
 ## Context
 
-The system already has a central asyncio FSM in `learning-app/app/orchestrator/fsm.py`. That FSM owns state changes and supports the following transition shape:
+The phase 3 FSM accepts `(IDLE, WAKE_DETECTED) → LISTENING` and the
+wildcard `CANCEL → IDLE` already returns to `IDLE`. This phase only
+implements the wake-word input source and microphone capture path; it
+must not mutate FSM state directly.
 
-- `IDLE + WAKE_DETECTED -> LISTENING`
-- `LISTENING + UTTERANCE_END -> THINKING`
-- `THINKING + REPLY_READY -> SPEAKING`
-- `SPEAKING + PLAYBACK_DONE -> LISTENING`
-- `LISTENING + CANCEL -> IDLE` (wildcard `CANCEL` already returns to `IDLE`; the wake-word / utterance source is responsible for emitting `CANCEL` after `LISTENING_SILENCE_TIMEOUT_S` of silence so a follow-up turn that nobody answers drops back to `IDLE` instead of holding the mic open)
-
-The `SPEAKING -> LISTENING` loopback lets the user ask follow-up questions in the same conversation without re-saying "Widushi". The silence timeout from `LISTENING` back to `IDLE` is what bounds that loop and forces the wake word again once the conversation is genuinely over.
-
-This phase only needs to implement the real wake-word input source and microphone capture path. It must not mutate FSM state directly.
+Speech-to-text and `UTTERANCE_END` are owned by phase 5.
 
 ## Functional Requirements
 
-- Add a real `WakeWordSource` in `learning-app/app/input/wakeword.py`.
-- Load the custom ONNX wake-word model from `WAKE_WORD_MODEL`, defaulting to `../openwakeword/vDu_shee.onnx` on host runs and `/openwakeword/vDu_shee.onnx` in the container image.
-- Keep wake-word detection enabled by default. Headless development can opt out with `WAKE_WORD_ENABLED=0`.
-- Keep model artifacts in the sibling `openwakeword/` directory. Do not move them into `learning-app` just for packaging.
-- When enabled, read microphone audio as mono `int16` PCM.
-- Feed OpenWakeWord `16 kHz`, `1280` sample frames, equivalent to `80 ms` of audio.
-- If microphone input is not already `16 kHz`, resample before inference.
-- Run OpenWakeWord inference without blocking the asyncio event loop.
-- When the best model score is at or above `WAKE_WORD_THRESHOLD`, emit:
+- Add a `WakeWordSource` in `learning-app/app/input/wakeword.py` as an
+  `InputSource` subclass started by `app/main.py` alongside the keyboard
+  source.
+- Load the custom ONNX wake-word model from `WAKE_WORD_MODEL`, defaulting
+  to `<workspace>/openwakeword/vDu_shee.onnx` on host runs and
+  `/openwakeword/vDu_shee.onnx` in the container image.
+- Keep wake-word detection enabled by default. Headless dev opts out
+  with `WAKE_WORD_ENABLED=0`.
+- Read mic audio as mono `int16` PCM, feed OpenWakeWord `1280`-sample
+  frames (80 ms at 16 kHz). Resample if the mic isn't 16 kHz.
+- Run OpenWakeWord inference off the event loop with
+  `asyncio.to_thread(...)`.
+- When the best score crosses `WAKE_WORD_THRESHOLD`, emit:
 
-```python
-Event(
-    EventType.WAKE_DETECTED,
-    payload={
-        "source": "openwakeword",
-        "label": label,
-        "score": score,
-    },
-)
-```
+  ```python
+  Event(EventType.WAKE_DETECTED,
+        payload={"source": "openwakeword", "label": label, "score": score})
+  ```
 
-- Suppress repeated detections for `WAKE_WORD_DEBOUNCE_S` seconds after a positive detection.
-- If wake-word detection is disabled or the model file is missing, log clearly and park the source task without crashing the app.
+- Suppress repeated detections inside `WAKE_WORD_DEBOUNCE_S`.
+- **FSM-aware gating (critical).** The source accepts an optional
+  `state_getter: Callable[[], AppState]`. When provided and the current
+  state is anything other than `AppState.IDLE`, the source must:
+  - drop the incoming mic chunk,
+  - clear the wake-word frame buffer,
+  - skip detector inference, and
+  - log once per state-change at DEBUG (no per-chunk spam).
+  Without this gate, ambient noise or the user's continued talking during
+  `THINKING`/`SPEAKING` re-fires `WAKE_DETECTED` (silently dropped by
+  the FSM table) **and** also kicks off a phantom 15 s recording in
+  phase 5's recorder whose `UTTERANCE_END` is also dropped — wasting
+  Gemma latency and confusing the user. The follow-up signal check
+  (phase 5) runs **before** the gate so post-`PLAYBACK_DONE` follow-up
+  listens still work.
+- If detection is disabled or the model file is missing, log clearly and
+  park the source task forever without crashing the app.
 
 ## Configuration
 
-Add these environment-backed settings in `learning-app/app/config.py`:
+Env-backed in `learning-app/app/config.py`:
 
-- `WAKE_WORD_MODEL`: path to the custom ONNX model. Default: `<workspace>/openwakeword/vDu_shee.onnx`.
-- `WAKE_WORD_ENABLED`: boolean opt-out flag. Default: enabled.
-- `WAKE_WORD_THRESHOLD`: detection threshold. Default: `0.5`.
-- `WAKE_WORD_DEBOUNCE_S`: repeated-detection debounce window. Default: `2.0`.
-- `WAKE_WORD_FRAME_MS`: mic chunk duration. Default: `80`.
+- `WAKE_WORD_MODEL`: path to `vDu_shee.onnx`. Default
+  `<workspace>/openwakeword/vDu_shee.onnx`.
+- `WAKE_WORD_ENABLED`: bool opt-out. Default `true`.
+- `WAKE_WORD_THRESHOLD`: detection threshold. Default `0.5`.
+- `WAKE_WORD_DEBOUNCE_S`: post-detection debounce window. Default `2.0`.
+- `WAKE_WORD_FRAME_MS`: mic chunk duration. Default `80`.
 
 ## Audio Capture
 
-Implement `MicSource` in `learning-app/app/hardware/mic.py` with one async contract:
+`MicSource` in `learning-app/app/hardware/mic.py`:
 
 ```python
-async def frames(self) -> AsyncIterator[bytes]:
-    ...
+async def frames(self) -> AsyncIterator[bytes]: ...
+def drain(self) -> int: ...        # used by phase 7's clip echo cleanup
 ```
 
-The source should support:
-
-- `stub=True`: yield silence forever for tests, CI, and wake-word-disabled development.
-- `stub=False`: use `sounddevice.RawInputStream` to capture mono `int16` PCM.
-- `sample_rate=16000` and `chunk_ms=80` by default.
-- A small bounded queue between the sounddevice callback thread and the asyncio loop.
-- Dropping old audio if the queue is full, rather than blocking the real-time audio callback.
+- `stub=True`: yield silence forever (used in tests and when
+  `WAKE_WORD_ENABLED=0`).
+- `stub=False`: capture mono `int16` PCM via `sounddevice.RawInputStream`,
+  default `sample_rate=16000`, `chunk_ms=80`.
+- Bounded queue between the sounddevice callback thread and the asyncio
+  loop. **Drop** old audio if the queue is full — never block the
+  real-time audio callback.
+- `MIC_INPUT_DEVICE` from `WIDUSHI_INPUT_DEVICE` env var (substring of
+  device name, integer index, or unset = ALSA `default`).
 
 ## Wake-Word Source Design
 
-`WakeWordSource` should remain an `InputSource` subclass and be started by `learning-app/app/main.py` like the other input sources. The source should use real microphone capture when enabled and silence/stub capture only when explicitly disabled or injected by tests.
+- `WakeWordDetector` protocol with
+  `predict(pcm16: bytes) -> Mapping[str, float]`.
+- `OpenWakeWordDetector` wrapper that imports `openwakeword.model.Model`
+  lazily and constructs:
 
-Recommended structure:
+  ```python
+  Model(wakeword_models=[str(model_path)], inference_framework="onnx")
+  ```
 
-- `WakeWordDetector` protocol with `predict(pcm16: bytes) -> Mapping[str, float]`.
-- `OpenWakeWordDetector` wrapper that imports `openwakeword.model.Model` lazily and constructs:
-
-```python
-Model(
-    wakeword_models=[str(model_path)],
-    inference_framework="onnx",
-)
-```
-
-- Dependency injection for `mic`, `detector_factory`, and `clock` so tests can run without OpenWakeWord, NumPy model files, or audio hardware.
-- Buffer incoming audio bytes until at least `1280 * 2` bytes are available, then process one frame at a time.
-- Call detector inference via `asyncio.to_thread(...)`.
+- Dependency injection for `mic`, `detector_factory`, `clock`, and
+  `state_getter` so tests run without OpenWakeWord, audio hardware, real
+  model files, or a real orchestrator.
+- Buffer incoming bytes until `1280 * 2` are available, then process one
+  frame at a time.
 
 ## Dependencies
 
-Add runtime dependencies in `learning-app/pyproject.toml`:
+`learning-app/pyproject.toml` runtime: `numpy`, `onnxruntime`,
+`openwakeword`, `sounddevice`. Container OS: `libasound2`,
+`libportaudio2`. Build the image from the workspace root and copy
+`openwakeword/` to `/openwakeword`; set
+`WAKE_WORD_MODEL=/openwakeword/vDu_shee.onnx` in the image. The model
+files do not need to move into `learning-app`.
 
-- `numpy`
-- `onnxruntime`
-- `openwakeword`
-- `sounddevice`
+The Dockerfile must also pre-fetch openWakeWord's shared feature models
+during build (`from openwakeword.utils import download_models;
+download_models(model_names=['vDu_shee'])`) so the Pi can start
+detection without first-boot network access.
 
-Add container OS dependencies in `learning-app/docker/Dockerfile.app`:
+## Tests
 
-- `libasound2`
-- `libportaudio2`
+`learning-app/tests/test_wakeword.py`. Use a `FakeMic` (yields
+pre-supplied `bytes` chunks) and a `FakeDetector` (returns a queued list
+of `Mapping[str, float]`) so no real audio hardware or model is needed:
 
-Build the image from the workspace root so the sibling `openwakeword/` directory is in the Docker context, then copy it into `/openwakeword`. Set `WAKE_WORD_MODEL=/openwakeword/vDu_shee.onnx` in the image. The model files do not need to move into `learning-app`.
+- Above-threshold score emits exactly one `WAKE_DETECTED` with payload
+  `{"source": "openwakeword", "label": ..., "score": ...}`.
+- Repeated high scores inside `WAKE_WORD_DEBOUNCE_S` do not flood the
+  queue.
+- **FSM gate (added in this phase).** With
+  `state_getter=lambda: AppState.THINKING`, no `WAKE_DETECTED` is
+  emitted and the detector is never invoked, even with all-high scores.
+- **FSM gate resumes.** With a `state_getter` whose first call returns a
+  non-IDLE state and subsequent calls return `IDLE`, the detector is
+  only invoked on chunks observed while state was `IDLE`.
 
-## Testing Requirements
-
-Add focused tests in `learning-app/tests/test_wakeword.py`:
-
-- A fake mic and fake detector test proving a score above threshold emits exactly one `WAKE_DETECTED`.
-- A debounce test proving repeated high scores inside the debounce window do not flood the queue.
-- Tests must not require real audio hardware, OpenWakeWord inference, or a real model file.
-
-Keep the existing FSM tests as the end-to-end state transition proof.
+(Recording / silence-timeout tests belong in phase 5.)
 
 ## Validation
 
-From `learning-app`, run:
-
 ```bash
-make lint
-make test
+make -C learning-app lint
+make -C learning-app test
 ```
 
-Expected result:
-
-- Ruff passes for `app` and `tests`.
-- Pytest passes all FSM and wake-word tests.
-
-## Manual Smoke Test
-
-Run:
+Manual smoke test on the host:
 
 ```bash
-make run
+make -C learning-app run
+# say "Widushi"
+curl localhost:8020/state    # → "LISTENING"
 ```
 
-Then speak "Widushi" and verify:
-
-```bash
-curl localhost:8020/state
-```
-
-The state should move from `IDLE` to `LISTENING` after the wake word is detected.
-
-For headless runs without microphone access:
-
-```bash
-WAKE_WORD_ENABLED=0 make run
-```
+For headless dev / CI: `WAKE_WORD_ENABLED=0 make run`.
 
 ## Non-Goals
 
-- Do not implement speech-to-text or `UTTERANCE_END` detection in this phase.
-- Do not change the FSM transition table beyond what this PRD documents (the `SPEAKING -> LISTENING` loopback and the `LISTENING` silence timeout to `IDLE` via `CANCEL`); any further transition changes belong in their own PRD.
-- Do not make wake-word detection mandatory for headless development or tests; allow `WAKE_WORD_ENABLED=0`.
-- Do not move generated wake-word model files into `learning-app`; package them from the sibling `openwakeword/` directory.
+- No speech-to-text, recording, or `UTTERANCE_END` emission (phase 5).
+- No FSM transition table changes beyond what phase 3 documented.
+- Wake-word detection must remain optional (`WAKE_WORD_ENABLED=0`) for
+  headless dev / tests.
+- Do not move generated wake-word model files into `learning-app`.

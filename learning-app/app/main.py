@@ -18,6 +18,7 @@ import pygame
 from app import config
 from app.api.server import build_uvicorn_server
 from app.events import Event, EventType
+from app.hardware.fb_sink import FbSink
 from app.input.keyboard import KeyboardSource
 from app.input.utterance import FollowUpListenSignal, UtteranceStopSignal
 from app.input.wakeword import WakeWordSource
@@ -47,6 +48,11 @@ async def amain() -> None:
     log = logging.getLogger("app.main")
 
     screen = _init_pygame()
+    # On the Pi SPI TFT, SDL renders into an off-screen "dummy" surface
+    # and we copy the pixels to /dev/fb0 via FbSink. On Mac (cocoa) and
+    # headless dev runs the env var is unset and create_from_env() returns
+    # None, so ``pygame.display.flip()`` keeps doing the work alone.
+    fb_sink = FbSink.create_from_env()
     queue: asyncio.Queue[Event] = asyncio.Queue()
     key_events: asyncio.Queue[int] = asyncio.Queue(maxsize=64)
     utterance_stop = UtteranceStopSignal()
@@ -54,7 +60,7 @@ async def amain() -> None:
 
     services = Services.live()
     orchestrator = Orchestrator(queue, services, followup_listen=followup_listen)
-    ui = UILoop(screen, orchestrator, key_events)
+    ui = UILoop(screen, orchestrator, key_events, fb_sink=fb_sink)
     keyboard = KeyboardSource(
         queue,
         key_events,
@@ -65,6 +71,10 @@ async def amain() -> None:
         stop_signal=utterance_stop,
         followup_signal=followup_listen,
         clips=services.clips,
+        # Pause wake-word detection while a turn is mid-flight so noise
+        # / continued speech in THINKING/SPEAKING does not start phantom
+        # recordings whose UTTERANCE_END the FSM silently discards.
+        state_getter=lambda: orchestrator.state,
     )
     server = build_uvicorn_server(
         orchestrator,
@@ -121,6 +131,8 @@ async def amain() -> None:
         await services.piper.aclose()
         await services.clips.aclose()
         await services.db.close()
+        if fb_sink is not None:
+            fb_sink.close()
         pygame.quit()
         log.info("widushi exited")
 

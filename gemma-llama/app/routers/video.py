@@ -90,6 +90,14 @@ async def analyze_process(
     include_audio: bool = Form(True, description="If true, also send the clip's audio track."),
     max_tokens: int | None = Form(None, ge=1, le=4096),
     temperature: float | None = Form(None, ge=0.0, le=2.0),
+    thinking: bool = Form(
+        False,
+        description=(
+            "If true, preserve and expose the model's chain-of-thought. "
+            "Default off because reasoning roughly doubles the decoded "
+            "token count on Pi 5 for the same final analysis."
+        ),
+    ),
     stream: bool = Form(
         False,
         description="Stream NDJSON tokens (no JSON-format enforcement -- clients must concat before parsing).",
@@ -173,7 +181,7 @@ async def analyze_process(
                         messages,
                         max_tokens=resolved_max_tokens,
                         temperature=resolved_temperature,
-                        thinking=cfg.defaults.thinking,
+                        thinking=thinking,
                     ):
                         await queue.put(line)
                 except LlamaServerError as exc:
@@ -221,7 +229,7 @@ async def analyze_process(
             messages,
             max_tokens=resolved_max_tokens,
             temperature=resolved_temperature,
-            thinking=cfg.defaults.thinking,
+            thinking=thinking,
             response_format={"type": "json_object"},
         )
     except LlamaServerError as exc:

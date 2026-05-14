@@ -69,6 +69,11 @@ All endpoints live at the root, served on host port `${API_PORT:-8010}` (contain
 
 Every successful response includes `inference_time_ms`; `/generate` and `/chat` additionally surface `tokens_predicted` and full `usage`. Every response carries an `X-Process-Time-Ms` header.
 
+### Defaults you should know about
+
+- **`thinking` is off by default** on every endpoint that exposes a `thinking` parameter (`/generate`, `/chat`, `/classify`, `/extract`, `/summarize`, `/vision/explain-work`, `/audio/listen`, `/video/analyze-process`). Chain-of-thought roughly doubles the decoded token count on Pi 5 for the same final answer, so we make callers opt in explicitly. Set `"thinking": true` (JSON) or `thinking=true` (form) per request when reasoning helps quality. `/audio/translate` and `/audio/transcribe` always run with `thinking=false` (no parameter — reasoning has no business in transcription).
+- **Image / audio / video downsizing**: uploads to the multimodal routes are normalised in [`app/media_multipart.py`](../app/media_multipart.py) before they reach the projector — images are resized to fit Gemma 4's 896 px tile (longest edge) and re-encoded as JPEG; audio is transcoded to mono 16 kHz WAV; video is sampled to `n_frames=3` evenly-spaced 896-px JPEG frames plus an optional mono 16 kHz audio track in one ffmpeg pass. The video frame cap is `n_frames=6` because each frame costs ~60-80 s through the vision projector on Pi 5 CPU.
+
 ### Streaming
 
 Set `"stream": true` on `/generate` or `/chat`. The body is `application/x-ndjson`; each line is one of:
@@ -87,7 +92,7 @@ for the full opt-in surface.
 
 ### Thinking toggle
 
-`thinking: true` (default) preserves the model's chain-of-thought. `thinking: false` (a) sends `chat_template_kwargs.enable_thinking=false` to llama.cpp so chat templates that honour it (Qwen3, newer Gemma builds) skip emitting `<think>` blocks, (b) appends `/no_think` to the last user message as a Qwen3-style fallback, and (c) filters any `reasoning_content` deltas or stray `<think>...</think>` spans in the adapter so neither the streaming NDJSON nor the response `text` ever contains reasoning. With `thinking: false` the dashboard will not show `[think] ...` lines.
+`thinking: false` (default) suppresses chain-of-thought. The adapter (a) sends `chat_template_kwargs.enable_thinking=false` to llama.cpp so chat templates that honour it (Qwen3, newer Gemma builds) skip emitting `<think>` blocks, (b) appends `/no_think` to the last user message as a Qwen3-style fallback, and (c) filters any `reasoning_content` deltas or stray `<think>...</think>` spans so neither the streaming NDJSON nor the response `text` ever contains reasoning. Setting `thinking: true` re-enables reasoning and exposes it via the streaming `[think] ...` events / `thinking_content` response field.
 
 ### Image attachments
 
@@ -148,7 +153,7 @@ curl -s -X POST localhost:8010/audio/translate \
 curl -s -X POST localhost:8010/video/analyze-process \
   -F "video=@titration.mp4" \
   -F "task=titrate NaOH into HCl until colour change" \
-  -F "n_frames=8" | jq
+  -F "n_frames=4" | jq
 ```
 
 ---
@@ -161,12 +166,15 @@ All settings come from environment variables (typically via `.env`). See [`.env.
 |----------|---------|---------|
 | `API_PORT` | `8010` | Host port for the FastAPI service. |
 | `MODEL_CONFIG_PATH` | `model_configs/gemma4-e4b.yaml` | Active model YAML (consumed by the `api` container). |
-| `MODEL_REPO` / `MODEL_FILE` | `unsloth/gemma-4-E4B-it-GGUF` / `gemma-4-E4B-it-Q4_K_M.gguf` | HF source for the GGUF (consumed by `download_model.sh`). |
-| `MMPROJ_REPO` / `MMPROJ_FILE` | `unsloth/gemma-4-E4B-it-GGUF` / `mmproj-BF16.gguf` | Official Google vision/audio projector. Set both to empty for a text-only deployment. |
+| `MODEL_REPO` / `MODEL_FILE` | `unsloth/gemma-4-E4B-it-GGUF` / `gemma-4-E4B-it-Q4_0.gguf` | HF source for the GGUF (consumed by `download_model.sh`). Q4_0 is preferred on Pi 5 because llama.cpp's repacked dotprod SGEMM kernel makes it the fastest matmul path on Cortex-A76; switch to a K-quant (e.g. `Q4_K_M`) on CUDA / Apple-silicon hosts. |
+| `MMPROJ_REPO` / `MMPROJ_FILE` | `unsloth/gemma-4-E4B-it-GGUF` / `mmproj-F16.gguf` | Official Google vision/audio projector. F16 is the fastest precision on Pi 5 / consumer CPUs (no native BF16); switch to `mmproj-BF16.gguf` on CUDA / Apple-silicon hosts. Set both to empty for a text-only deployment. |
 | `HF_TOKEN` | _unset_ | Required only for gated repos. |
 | `CONTEXT_SIZE` | `8192` | `llama-server -c`. |
 | `THREADS` | `4` (Pi) | `llama-server -t`; bump to your physical core count on dev boxes. |
 | `GPU_LAYERS` | `0` | `llama-server -ngl`; flipped to `99` by `docker-compose.gpu.yml`. |
+| `FLASH_ATTN` | `true` | Adds `-fa` to `llama-server`. Required for non-`f16` V-cache; setting to `false` silently drops `CACHE_TYPE_V` back to the default. |
+| `CACHE_TYPE_K` / `CACHE_TYPE_V` | `q8_0` / `q8_0` | KV-cache quantisation. `q8_0` typically gives 20-40% faster decode at 8k ctx on Pi 5 with no measurable quality loss; `f16` reverts to the lossless baseline; `q4_0` is more aggressive. |
+| `MLOCK` | `true` | Pins model weights in RAM via `mlock(2)` so a memory spike (ffmpeg, etc.) cannot page them out. Safe on Pi 5 16 GB; set to `false` on memory-tight hosts. |
 | `LLAMA_SERVER_URL` | `http://llama:8080` | Adapter base URL. |
 | `LLM_TIMEOUT_SECONDS` | `300` | HTTP timeout for inference requests. |
 | `LLM_RETRIES` | `3` | Exponential-backoff retries on transient failures. |
@@ -193,9 +201,9 @@ All settings come from environment variables (typically via `.env`). See [`.env.
    ```env
    MODEL_CONFIG_PATH=model_configs/gemma4-e4b.yaml
    MODEL_REPO=unsloth/gemma-4-E4B-it-GGUF
-   MODEL_FILE=gemma-4-E4B-it-Q4_K_M.gguf
+   MODEL_FILE=gemma-4-E4B-it-Q4_0.gguf
    MMPROJ_REPO=unsloth/gemma-4-E4B-it-GGUF
-   MMPROJ_FILE=mmproj-BF16.gguf
+   MMPROJ_FILE=mmproj-F16.gguf
    ```
 3. `docker compose up -d --build` (the new GGUF downloads to `./models` once and is reused thereafter).
 
@@ -238,7 +246,25 @@ All tasks also report latency `p50/p95/p99/mean` from the API's `inference_time_
 - **Restart on boot:** both services use `restart: unless-stopped`; ensure the Docker daemon itself starts on boot (`sudo systemctl enable docker`).
 - **Updating code:** `git pull && docker compose up -d --build` rebuilds only what changed; `./models/` is preserved across rebuilds.
 - **Swapping models:** edit `.env`, then `docker compose up -d`; you can `docker compose restart llama` after the new GGUF finishes downloading.
-- **Disk usage:** the GGUF lives under `./models/`. Q4_K_M E2B is ~1.6 GB; the `mmproj` adds a few hundred MB.
+- **Disk usage:** the GGUF lives under `./models/`. Q4_0 E2B is ~1.5 GB (Q4_0 E4B is ~2.7 GB); the `mmproj` adds ~950 MB at F16.
+
+### Host-side tuning on Pi 5
+
+These knobs live outside the container but materially affect inference speed:
+
+- **CPU governor**: switch to `performance` so the Pi doesn't downclock the A76 cores between requests:
+
+  ```bash
+  sudo cpupower frequency-set -g performance
+  # persist across reboot:
+  echo 'GOVERNOR="performance"' | sudo tee /etc/default/cpufrequtils
+  ```
+
+- **Active cooling**: a fan-equipped case (the official Pi 5 Active Cooler is plenty) is non-negotiable for sustained inference. Without one, the SoC throttles from 2.4 GHz down to ~1.5 GHz under sustained load, which silently halves your tokens/sec. Verify with `vcgencmd measure_clock arm` while a request is in flight; you should see ~2.4 GHz, not lower.
+
+- **NVMe SSD**: doesn't change steady-state throughput, but eliminates the cold-start model-load minute on first boot (an SD-card load of a 4-5 GB GGUF can take 60-90 s). Either an HAT-mounted NVMe or a USB 3.0 SSD works.
+
+- **Container memlock limit**: `MLOCK=true` (default) needs an unlimited `RLIMIT_MEMLOCK` inside the container, which Docker's defaults don't grant. The `llama` service in `docker-compose.yml` therefore ships with `ulimits: { memlock: -1 }`. If you set `MLOCK=false`, you can drop that block; if you ever see `failed to mlock ... Cannot allocate memory` in `docker compose logs llama`, the ulimit is the thing to check first.
 
 ---
 
@@ -270,11 +296,11 @@ All tasks also report latency `p50/p95/p99/mean` from the API's `inference_time_
 
 ## Notes & caveats
 
-- **Audio + Video are live on E2B/E4B.** The April 2026 llama.cpp release bundles the native Gemma 4 audio path; the unified `mmproj-BF16.gguf` projector that ships in the same Unsloth GGUF repo carries both vision and audio adapters, so a single `--mmproj` flag enables `/vision/*`, `/audio/*`, and `/video/*` end-to-end. The 26B-A4B and 31B model configs intentionally keep `audio: false` / `video: false` because Google did not release native audio adapters for those sizes.
+- **Audio + Video are live on E2B/E4B.** The April 2026 llama.cpp release bundles the native Gemma 4 audio path; the unified mmproj projector that ships in the same Unsloth GGUF repo (default: `mmproj-F16.gguf`; `mmproj-BF16.gguf` and `mmproj-F32.gguf` also available) carries both vision and audio adapters, so a single `--mmproj` flag enables `/vision/*`, `/audio/*`, and `/video/*` end-to-end. The 26B-A4B and 31B model configs intentionally keep `audio: false` / `video: false` because Google did not release native audio adapters for those sizes.
 - **Audio context budget.** Audio tokens are denser than text. `CONTEXT_SIZE=8192` (default) handles ~30 s clips comfortably; bump to `16384` for longer recordings if Pi RAM allows.
 - **Video has no native llama.cpp path yet.** `/video/analyze-process` sidesteps that by sampling N evenly spaced frames + the audio track in one ffmpeg pass and feeding both to Gemma 4 in a single multimodal turn.
 - **Model availability:** the `unsloth/gemma-4-*` GGUF mirrors are the default; other community mirrors (e.g. `bartowski/...`, `ggml-org/...`) are equally usable via `MODEL_REPO`/`MODEL_FILE`.
-- **Pi performance:** expect ~3-6 tokens/sec on Pi 5 with E2B Q4_K_M for text; ~4-8 s for a 5-10 s spoken question via `/audio/listen`; ~12-25 s for a 6-frame `/video/analyze-process` clip with audio.
+- **Pi performance:** expect ~3-6 tokens/sec on Pi 5 with E2B Q4_0 for text (E4B Q4_0 is ~1.8-3 t/s); ~4-8 s for a 5-10 s spoken question via `/audio/listen`; ~12-25 s for a 6-frame `/video/analyze-process` clip with audio. With flash attention + q8_0 KV cache + F16 mmproj + Q4_0 weights enabled (see `.env.example`), end-to-end latency is roughly 30-50% lower than the original BF16 / Q4_K_M defaults.
 - **Future work:** see `specification.md` section 16 (embeddings, GPU auto-detection, model hot-swap).
 
 ---

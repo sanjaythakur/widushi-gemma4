@@ -61,6 +61,14 @@ RUN pip install \
 # stock wake-word models; the shared feature/VAD models are always fetched.
 RUN python -c "from openwakeword.utils import download_models; download_models(model_names=['vDu_shee'])"
 
+# ALSA routing for Pi USB mic + USB speaker. Pins "default" capture to
+# card 0 (USB mic) and "default" playback to card 1 (USB speaker), so
+# pygame.mixer / SDL_AUDIODEV=default and sounddevice device=None both
+# land on the right hardware. Adjust card numbers in this file if your
+# Pi enumerates them differently — see ``aplay -l`` / ``arecord -l``
+# on the host.
+COPY learning-app/docker/asound.conf /etc/asound.conf
+
 # Application source.
 COPY learning-app/app /app/app
 COPY openwakeword /openwakeword
