@@ -1,9 +1,11 @@
 """FastAPI app and uvicorn factory.
 
 Routes:
-    GET  /health   -> liveness probe
-    GET  /state    -> current orchestrator state
-    POST /events   -> enqueue an Event by ``EventType.name``
+    GET  /health        -> liveness probe
+    GET  /state         -> current orchestrator (per-turn) state
+    GET  /system_state  -> current outer state (IDLE / SESSION / ERROR)
+    GET  /mode          -> active mode + list of registered modes
+    POST /events        -> enqueue an Event by ``EventType.name``
 """
 
 from __future__ import annotations
@@ -41,6 +43,18 @@ def build_api(
     @api.get("/state")
     async def get_state() -> dict[str, str]:
         return {"state": orchestrator.state.name}
+
+    @api.get("/system_state")
+    async def get_system_state() -> dict[str, str]:
+        return {"system_state": orchestrator.system_state.name}
+
+    @api.get("/mode")
+    async def get_mode() -> dict[str, Any]:
+        active = orchestrator.active_mode
+        return {
+            "active": active.name if active is not None else None,
+            "registered": orchestrator.mode_registry.names(),
+        }
 
     @api.post("/events", status_code=202)
     async def post_event(event_in: EventIn) -> dict[str, str]:

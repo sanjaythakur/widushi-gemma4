@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app import config
+from app.hardware.camera import CameraSource
 from app.services.clips import ClipPlayer
 from app.services.db import Database
 from app.services.gemma import GemmaClient
@@ -25,6 +26,7 @@ class Services:
     piper: PiperClient
     clips: ClipPlayer
     db: Database
+    camera: CameraSource
 
     @classmethod
     def stubs(cls) -> Services:
@@ -35,6 +37,7 @@ class Services:
             piper=PiperClient(stub=True),
             clips=ClipPlayer(stub=True),
             db=Database(),
+            camera=CameraSource(stub=True),
         )
 
     @classmethod
@@ -46,7 +49,15 @@ class Services:
             piper=PiperClient(),
             clips=ClipPlayer(),
             db=Database(),
+            camera=CameraSource(),
         )
 
 
-__all__ = ["ClipPlayer", "Database", "GemmaClient", "PiperClient", "Services"]
+__all__ = [
+    "CameraSource",
+    "ClipPlayer",
+    "Database",
+    "GemmaClient",
+    "PiperClient",
+    "Services",
+]

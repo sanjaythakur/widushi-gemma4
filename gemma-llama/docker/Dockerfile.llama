@@ -15,11 +15,22 @@ ARG GGML_CUDA=OFF
 # from after the early-April 2026 merge will do).
 ARG LLAMA_CPP_REF=b8837
 
+# Optional explicit ARM CPU baseline. On Pi 5 (Cortex-A76) we want
+# `armv8.2-a+dotprod+i8mm+fp16` so llama.cpp emits the i8mm-accelerated SGEMM
+# kernels (~30-50% faster Q4_0 matmul vs. the dotprod-only baseline). Empty by
+# default; the builder stage auto-fills it for arm64 image builds. Override at
+# build time (`docker build --build-arg GGML_CPU_ARM_ARCH=armv8.2-a+dotprod`)
+# to disable i8mm if your toolchain miscompiles those kernels.
+ARG GGML_CPU_ARM_ARCH=""
+
 # ----------------------------- Builder stage --------------------------------
 FROM ubuntu:22.04 AS builder
 
 ARG GGML_CUDA
 ARG LLAMA_CPP_REF
+ARG GGML_CPU_ARM_ARCH
+# BuildKit-provided; "amd64" / "arm64" / etc.
+ARG TARGETARCH=""
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -45,11 +56,28 @@ RUN if [ "${LLAMA_CPP_REF}" != "master" ]; then \
 RUN git rev-parse HEAD > /llama.cpp.sha && \
     echo "llama.cpp built at $(cat /llama.cpp.sha) (ref=${LLAMA_CPP_REF})"
 
-RUN cmake -B build \
+# Resolve the effective ARM CPU baseline: explicit build arg wins; otherwise
+# auto-fill on arm64 hosts (Pi 5 / Apple-silicon Linux containers) so the i8mm
+# matmul kernels are emitted. x86 builds leave this empty so cmake keeps its
+# native auto-detection.
+RUN set -eux; \
+    EFFECTIVE_ARM_ARCH="${GGML_CPU_ARM_ARCH}"; \
+    if [ -z "$EFFECTIVE_ARM_ARCH" ] && [ "${TARGETARCH}" = "arm64" ]; then \
+        EFFECTIVE_ARM_ARCH="armv8.2-a+dotprod+i8mm+fp16"; \
+    fi; \
+    EXTRA_CMAKE_ARGS=""; \
+    if [ -n "$EFFECTIVE_ARM_ARCH" ]; then \
+        EXTRA_CMAKE_ARGS="-DGGML_CPU_ARM_ARCH=${EFFECTIVE_ARM_ARCH}"; \
+        echo "llama.cpp ARM CPU baseline: ${EFFECTIVE_ARM_ARCH}"; \
+    else \
+        echo "llama.cpp ARM CPU baseline: (default / native auto-detect)"; \
+    fi; \
+    cmake -B build \
         -DGGML_CUDA=${GGML_CUDA} \
         -DLLAMA_CURL=ON \
         -DBUILD_SHARED_LIBS=ON \
         -DCMAKE_BUILD_TYPE=Release \
+        ${EXTRA_CMAKE_ARGS} \
     && cmake --build build --config Release -j"$(nproc)" --target llama-server
 
 # Stage all artifacts we need to copy into runtime in one place.
@@ -84,16 +112,23 @@ RUN chmod +x /usr/local/bin/download_model.sh
 ENV MODEL_DIR=/models \
     MODEL_PATH=/models/model.gguf \
     MMPROJ_PATH=/models/mmproj.gguf \
+    DRAFT_PATH=/models/draft.gguf \
     HOST=0.0.0.0 \
     PORT=8080 \
     CONTEXT_SIZE=8192 \
     THREADS=4 \
+    THREADS_BATCH= \
+    BATCH_SIZE=2048 \
+    UBATCH_SIZE=512 \
     GPU_LAYERS=0 \
     MMPROJ_USE_GPU=false \
     FLASH_ATTN=true \
     CACHE_TYPE_K=q8_0 \
     CACHE_TYPE_V=q8_0 \
-    MLOCK=true
+    MLOCK=true \
+    DRAFT_MAX=8 \
+    DRAFT_MIN=4 \
+    DRAFT_P_MIN=0.75
 
 EXPOSE 8080
 
@@ -116,6 +151,25 @@ HEALTHCHECK --interval=15s --timeout=10s --start-period=3600s --retries=5 \
 # no measurable quality loss. llama.cpp requires `-fa` whenever the V-cache is
 # anything other than f16, so we silently drop CACHE_TYPE_V back to the
 # default if FLASH_ATTN is disabled, rather than refusing to boot.
+#
+# Batch tuning (`-b`/`-ub`) controls prompt-processing parallelism. The Pi 5
+# defaults below (b=2048, ub=512) match llama.cpp upstream and balance prefill
+# throughput against L2-cache thrash on Cortex-A76. Drop ub to 256 if your
+# multimodal prefill saturates the cache; bump b to 4096 on hosts with a GPU.
+# `--threads-batch` decouples prompt-eval thread count from decode threads;
+# Pi 5 is happiest using all 4 cores for both phases (default falls back to
+# THREADS when THREADS_BATCH is empty).
+#
+# Draft / speculative decoding (`-md` / `--draft-*`) is OFF by default for
+# Gemma 4 E4B because no compatible draft model exists in stock llama.cpp at
+# the pinned ref:
+#   * google/gemma-4-E4B-it-assistant (the official 78M MTP drafter) needs
+#     the atomic-llama-cpp-turboquant fork (custom `gemma4_assistant` arch).
+#   * Using gemma-4-E2B-it as a draft is blocked by ggml-org/llama.cpp#22337
+#     (per-layer tensor metadata mismatch with E4B/31B targets).
+#   * gemma-3-270m-it has the wrong tokenizer (Gemma 3 SPM vs Gemma 4 BPE).
+# The plumbing below is wired so flipping DRAFT_REPO/DRAFT_FILE in `.env`
+# enables it the moment a compatible draft lands upstream.
 #
 # IMPORTANT: leading `set -e` so a non-zero exit from download_model.sh aborts
 # the container immediately (otherwise `;` separators below would fall through
@@ -154,6 +208,24 @@ CMD ["/bin/bash", "-eo", "pipefail", "-c", "\
     case \"$MLOCK_LC\" in \
         true|1|yes|on) MLOCK_FLAG='--mlock' ;; \
     esac; \
+    BATCH_FLAGS=''; \
+    if [ -n \"$BATCH_SIZE\" ]; then \
+        BATCH_FLAGS=\"-b $BATCH_SIZE\"; \
+    fi; \
+    if [ -n \"$UBATCH_SIZE\" ]; then \
+        BATCH_FLAGS=\"$BATCH_FLAGS -ub $UBATCH_SIZE\"; \
+    fi; \
+    if [ -n \"$THREADS_BATCH\" ]; then \
+        BATCH_FLAGS=\"$BATCH_FLAGS -tb $THREADS_BATCH\"; \
+    fi; \
+    DRAFT_FLAGS=''; \
+    if [ -f \"$DRAFT_PATH\" ]; then \
+        DRAFT_FLAGS=\"-md $DRAFT_PATH\"; \
+        if [ -n \"$DRAFT_MAX\" ];   then DRAFT_FLAGS=\"$DRAFT_FLAGS --draft-max $DRAFT_MAX\"; fi; \
+        if [ -n \"$DRAFT_MIN\" ];   then DRAFT_FLAGS=\"$DRAFT_FLAGS --draft-min $DRAFT_MIN\"; fi; \
+        if [ -n \"$DRAFT_P_MIN\" ]; then DRAFT_FLAGS=\"$DRAFT_FLAGS --draft-p-min $DRAFT_P_MIN\"; fi; \
+        echo \"[llama] speculative decoding ENABLED with draft=$DRAFT_PATH (max=$DRAFT_MAX min=$DRAFT_MIN p_min=$DRAFT_P_MIN)\" 1>&2; \
+    fi; \
     exec llama-server \
         -m \"$MODEL_PATH\" \
         $MMPROJ_FLAG \
@@ -162,8 +234,10 @@ CMD ["/bin/bash", "-eo", "pipefail", "-c", "\
         -c \"$CONTEXT_SIZE\" \
         -t \"$THREADS\" \
         -ngl \"$GPU_LAYERS\" \
+        $BATCH_FLAGS \
         $FA_FLAG \
         $KV_FLAGS \
         $MLOCK_FLAG \
+        $DRAFT_FLAGS \
         --jinja \
 "]

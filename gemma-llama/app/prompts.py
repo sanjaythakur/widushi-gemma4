@@ -75,3 +75,27 @@ def render_video_lab_prompt(
 ) -> str:
     template = _env.from_string(cfg.prompts.video_lab)
     return template.render(task=task or "", include_audio=include_audio)
+
+
+def render_free_convo_prompt(cfg: ModelConfig) -> str:
+    template = _env.from_string(cfg.prompts.free_convo)
+    return template.render()
+
+
+def render_voice_mirror_suggest_prompt(
+    cfg: ModelConfig, *, level: str | None, history: list[str] | None
+) -> str:
+    template = _env.from_string(cfg.prompts.voice_mirror_suggest)
+    return template.render(level=level or "", history=history or [])
+
+
+def render_voice_mirror_score_prompt(
+    cfg: ModelConfig, *, target_word: str
+) -> str:
+    template = _env.from_string(cfg.prompts.voice_mirror_score)
+    return template.render(target_word=target_word)
+
+
+def render_vision_teach_prompt(cfg: ModelConfig) -> str:
+    template = _env.from_string(cfg.prompts.vision_teach)
+    return template.render()

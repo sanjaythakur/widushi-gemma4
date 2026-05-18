@@ -14,6 +14,13 @@ services:
         # Pin to a tagged llama.cpp build that contains the April 2026 native
         # Gemma 4 audio merge. Override in .env to bump.
         LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b8837}
+        # ARM CPU baseline. Empty on x86_64 hosts (cmake auto-detect is fine);
+        # the Dockerfile auto-fills `armv8.2-a+dotprod+i8mm+fp16` for arm64
+        # builds (Pi 5 / Apple-silicon Linux) so Cortex-A76 gets the i8mm
+        # matmul kernels. Override here to force a specific baseline
+        # regardless of TARGETARCH (e.g. `armv8.2-a+dotprod` to disable i8mm
+        # if the host toolchain miscompiles those kernels).
+        GGML_CPU_ARM_ARCH: ${GGML_CPU_ARM_ARCH:-}
     image: gemma-llama/llama:cpu
     container_name: gemma-llama-llama
     restart: unless-stopped
@@ -23,6 +30,7 @@ services:
       MODEL_DIR: /models
       MODEL_PATH: /models/model.gguf
       MMPROJ_PATH: /models/mmproj.gguf
+      DRAFT_PATH: /models/draft.gguf
       MODEL_REPO: ${MODEL_REPO:-unsloth/gemma-4-E4B-it-GGUF}
       # Default to Q4_0 because llama.cpp's repacked dotprod SGEMM kernel
       # is the fastest matmul path on Pi 5 / Cortex-A76. Override to a
@@ -44,7 +52,29 @@ services:
       PORT: 8080
       CONTEXT_SIZE: ${CONTEXT_SIZE:-8192}
       THREADS: ${THREADS:-4}
+      # `--threads-batch`: prompt-eval thread pool. Empty = same as THREADS,
+      # which is the right default on Pi 5 (4 cores; nothing to gain by
+      # splitting). Set to a higher count on hosts with more cores if decode
+      # latency matters more than prefill.
+      THREADS_BATCH: ${THREADS_BATCH:-}
+      # Prompt-batch tuning. Larger BATCH_SIZE improves prefill throughput on
+      # multimodal prompts; UBATCH_SIZE controls the per-step micro-batch and
+      # should be a divisor of BATCH_SIZE. Pi 5 defaults match llama.cpp
+      # upstream; drop UBATCH_SIZE to 256 if your prefill thrashes L2.
+      BATCH_SIZE: ${BATCH_SIZE:-2048}
+      UBATCH_SIZE: ${UBATCH_SIZE:-512}
       GPU_LAYERS: ${GPU_LAYERS:-0}
+      # Speculative decoding. OFF by default for Gemma 4 E4B because no
+      # compatible draft model exists in stock llama.cpp (see .env.example
+      # for the full rationale). Set DRAFT_REPO/DRAFT_FILE to opt in once a
+      # compatible draft is available; the download_model.sh script picks
+      # them up automatically and llama-server adds `--model-draft` only
+      # when the file actually lands on disk.
+      DRAFT_REPO: ${DRAFT_REPO:-}
+      DRAFT_FILE: ${DRAFT_FILE:-}
+      DRAFT_MAX: ${DRAFT_MAX:-8}
+      DRAFT_MIN: ${DRAFT_MIN:-4}
+      DRAFT_P_MIN: ${DRAFT_P_MIN:-0.75}
       # Decode-speed knobs (Pi 5 is memory-bandwidth bound). `-fa` enables
       # flash attention; q8_0 K/V cache halves KV-cache bandwidth with no
       # measurable quality loss. Setting FLASH_ATTN=false also forces the
@@ -97,6 +127,16 @@ services:
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-300}
       LLM_RETRIES: ${LLM_RETRIES:-3}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Prompt-prefix cache opt-in. True = sets `cache_prompt: true` on every
+      # /v1/chat/completions payload so byte-identical system prompts hit
+      # llama.cpp's slot KV cache. Set to false only for benchmarking the
+      # cold-start path.
+      LLAMA_CACHE_PROMPT: ${LLAMA_CACHE_PROMPT:-true}
+      # Edge media preprocessing. 896 = Gemma 4's native vision tile; drop to
+      # 512 to make camera-driven prefill ~3x faster at the cost of fine OCR
+      # detail. JPEG_QUALITY 88 keeps the re-encoded tile visually lossless.
+      IMAGE_MAX_EDGE: ${IMAGE_MAX_EDGE:-896}
+      IMAGE_JPEG_QUALITY: ${IMAGE_JPEG_QUALITY:-88}
       # ---- TTS (Piper) ----------------------------------------------------
       TTS_ENABLED: ${TTS_ENABLED:-true}
       PIPER_BINARY: ${PIPER_BINARY:-/usr/local/bin/piper}

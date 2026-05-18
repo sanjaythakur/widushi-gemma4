@@ -13,7 +13,18 @@ from fastapi.templating import Jinja2Templates
 from .config import get_settings
 from .llama_adapter import LlamaAdapter
 from .model_config import load_model_config
-from .routers import audio, chat, classify, extract, generate, summarize, video, vision
+from .routers import (
+    audio,
+    chat,
+    classify,
+    extract,
+    free_convo,
+    generate,
+    summarize,
+    video,
+    vision,
+    voice_mirror,
+)
 from .schemas import HealthResponse
 from .tts import PiperEngine
 from .tts.router import router as tts_router
@@ -160,4 +171,6 @@ app.include_router(summarize.router, tags=["tasks"])
 app.include_router(vision.router, tags=["tutor"])
 app.include_router(audio.router, tags=["tutor"])
 app.include_router(video.router, tags=["tutor"])
+app.include_router(free_convo.router, tags=["modes"])
+app.include_router(voice_mirror.router, tags=["modes"])
 app.include_router(tts_router, tags=["tts"])

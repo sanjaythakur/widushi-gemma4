@@ -11,12 +11,23 @@ Responsibilities:
       plus the Qwen3-style ``/no_think`` directive) AND filter any ``<think>``
       / ``reasoning_content`` that the model emits anyway, so callers with
       ``thinking=False`` never see a ``[think]`` event.
+
+Prompt-prefix caching:
+    Every chat completion sets ``cache_prompt: true`` so llama.cpp's slot KV
+    cache reuses any byte-identical prefix from the previous request on the
+    same slot. This is what makes "keep system prompts byte-identical across
+    calls" actually pay off: a tutor system prompt is encoded once per slot
+    and skipped on every subsequent call until the prefix diverges. The flag
+    is the default in modern llama.cpp builds; we set it explicitly so the
+    behaviour is pinned across version bumps and obvious to anyone reading
+    the payload.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from copy import deepcopy
@@ -27,6 +38,19 @@ import httpx
 from .errors import LlamaServerError
 
 logger = logging.getLogger(__name__)
+
+
+def _cache_prompt_default() -> bool:
+    """Resolve the default ``cache_prompt`` value once per process.
+
+    Set ``LLAMA_CACHE_PROMPT=false`` to disable prefix caching globally (only
+    useful for benchmarking the cold-start path).
+    """
+    raw = os.environ.get("LLAMA_CACHE_PROMPT", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+_CACHE_PROMPT_DEFAULT = _cache_prompt_default()
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +210,9 @@ class LlamaAdapter:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
+            # Opt-in to llama.cpp's slot-level prefix-cache reuse. See module
+            # docstring; default is True, override with LLAMA_CACHE_PROMPT=false.
+            "cache_prompt": _CACHE_PROMPT_DEFAULT,
         }
         if not thinking:
             # llama.cpp forwards chat_template_kwargs into the Jinja chat
@@ -231,6 +258,10 @@ class LlamaAdapter:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
+            # Same prefix-cache opt-in as the non-streaming path; identical
+            # system prompts across calls hit the slot KV cache and skip
+            # re-encoding the tutor instructions.
+            "cache_prompt": _CACHE_PROMPT_DEFAULT,
         }
         if not thinking:
             payload["chat_template_kwargs"] = {"enable_thinking": False}

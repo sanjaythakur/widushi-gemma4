@@ -22,6 +22,13 @@ class EventType(Enum):
     PLAYBACK_DONE = auto()
     CANCEL = auto()
     SHUTDOWN = auto()
+    # Mid-session swap from one Mode to another (e.g. FreeConvoMode ->
+    # VoiceMirrorMode after the learner asks to start practising). The
+    # ``system_state`` stays ``SESSION``; only the active Mode changes.
+    # Payload keys: ``target_mode`` (str, required), ``auto_listen`` (bool,
+    # optional; default True — arm the wake-word source for the learner's
+    # next utterance after the new mode is installed).
+    MODE_CHANGE = auto()
 
 
 @dataclass(frozen=True)

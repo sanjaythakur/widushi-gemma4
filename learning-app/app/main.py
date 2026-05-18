@@ -22,6 +22,7 @@ from app.hardware.fb_sink import FbSink
 from app.input.keyboard import KeyboardSource
 from app.input.utterance import FollowUpListenSignal, UtteranceStopSignal
 from app.input.wakeword import WakeWordSource
+from app.modes import IntentRouter, build_default_registry
 from app.orchestrator import Orchestrator
 from app.services import Services
 from app.ui.loop import UILoop
@@ -59,7 +60,15 @@ async def amain() -> None:
     followup_listen = FollowUpListenSignal()
 
     services = Services.live()
-    orchestrator = Orchestrator(queue, services, followup_listen=followup_listen)
+    mode_registry = build_default_registry()
+    intent_router = IntentRouter(known_modes=mode_registry.names())
+    orchestrator = Orchestrator(
+        queue,
+        services,
+        followup_listen=followup_listen,
+        mode_registry=mode_registry,
+        intent_router=intent_router,
+    )
     ui = UILoop(screen, orchestrator, key_events, fb_sink=fb_sink)
     keyboard = KeyboardSource(
         queue,
@@ -131,6 +140,7 @@ async def amain() -> None:
         await services.piper.aclose()
         await services.clips.aclose()
         await services.db.close()
+        services.camera.close()
         if fb_sink is not None:
             fb_sink.close()
         pygame.quit()

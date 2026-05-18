@@ -18,12 +18,34 @@ import pytest
 
 from app.events import Event, EventType
 from app.input.utterance import FollowUpListenSignal
+from app.modes import IntentRouter, ModeRegistry, TutorMode
 from app.orchestrator import Orchestrator
 from app.services import Services
 from app.services.clips import ClipPlayer
 from app.services.gemma import GemmaClient, GemmaReply
 from app.services.piper import PiperClient
 from app.state import AppState
+
+
+def _tutor_only_orchestrator(queue, services, *, followup_listen=None) -> Orchestrator:
+    """Build an Orchestrator pinned to TutorMode for legacy FSM tests.
+
+    The post-wake default is now ``FreeConvoMode`` which calls a
+    different Gemma endpoint; tests that exercise the orchestrator's
+    audio/text plumbing (and only that) pin to TutorMode explicitly so
+    they remain agnostic to mode-selection changes.
+    """
+
+    registry = ModeRegistry()
+    registry.register(TutorMode.name, TutorMode)
+    router = IntentRouter(default=TutorMode.name, known_modes=registry.names())
+    return Orchestrator(
+        queue,
+        services,
+        followup_listen=followup_listen,
+        mode_registry=registry,
+        intent_router=router,
+    )
 
 
 class RecordingClips(ClipPlayer):
@@ -53,7 +75,7 @@ async def test_full_turn_round_trip() -> None:
     services.clips._latency_s = 0.0  # type: ignore[attr-defined]
 
     followup_listen = FollowUpListenSignal()
-    orch = Orchestrator(queue, services, followup_listen=followup_listen)
+    orch = _tutor_only_orchestrator(queue, services, followup_listen=followup_listen)
     transitions: list[tuple[AppState, AppState, EventType]] = []
     orch.add_listener(
         lambda prev, curr, ev: transitions.append((prev, curr, ev.type))
@@ -112,7 +134,7 @@ async def test_playback_done_without_followup_signal_stays_in_listening() -> Non
     services.piper._latency_s = 0.01  # type: ignore[attr-defined]
     services.clips._latency_s = 0.0  # type: ignore[attr-defined]
 
-    orch = Orchestrator(queue, services)  # no followup_listen
+    orch = _tutor_only_orchestrator(queue, services)  # no followup_listen
     transitions: list[tuple[AppState, AppState, EventType]] = []
     orch.add_listener(
         lambda prev, curr, ev: transitions.append((prev, curr, ev.type))
@@ -184,7 +206,7 @@ async def test_audio_utterance_uses_gemma_listen_audio() -> None:
     piper = RecordingPiper()
     services.gemma = gemma
     services.piper = piper
-    orch = Orchestrator(queue, services)
+    orch = _tutor_only_orchestrator(queue, services)
     replies: list[str] = []
     orch.add_listener(
         lambda _prev, _curr, ev: replies.append(ev.payload["text"])
@@ -233,7 +255,7 @@ async def test_tts_failure_cancels_turn_before_speaking() -> None:
     queue: asyncio.Queue[Event] = asyncio.Queue()
     services = Services.stubs()
     services.gemma = FailingGemma()
-    orch = Orchestrator(queue, services)
+    orch = _tutor_only_orchestrator(queue, services)
     transitions: list[tuple[AppState, AppState, EventType]] = []
     orch.add_listener(
         lambda prev, curr, ev: transitions.append((prev, curr, ev.type))
@@ -266,7 +288,7 @@ async def test_cancel_returns_to_idle_from_anywhere() -> None:
     services = Services.stubs()
     services.gemma._latency_s = 0.5  # type: ignore[attr-defined]
 
-    orch = Orchestrator(queue, services)
+    orch = _tutor_only_orchestrator(queue, services)
     runner = asyncio.create_task(orch.run())
 
     await queue.put(Event(EventType.WAKE_DETECTED))
@@ -289,7 +311,7 @@ async def test_cancel_returns_to_idle_from_anywhere() -> None:
 @pytest.mark.asyncio
 async def test_unknown_transitions_are_ignored() -> None:
     queue: asyncio.Queue[Event] = asyncio.Queue()
-    orch = Orchestrator(queue, Services.stubs())
+    orch = _tutor_only_orchestrator(queue, Services.stubs())
     runner = asyncio.create_task(orch.run())
 
     # PLAYBACK_DONE in IDLE has no mapping; must be ignored, state stays.
@@ -310,7 +332,7 @@ async def test_thinking_plays_wait_thinking_for_fresh_turn() -> None:
     clips = RecordingClips(latency_s=0.0)
     services.clips = clips
 
-    orch = Orchestrator(queue, services)
+    orch = _tutor_only_orchestrator(queue, services)
     runner = asyncio.create_task(orch.run())
 
     try:
@@ -343,7 +365,7 @@ async def test_thinking_plays_wait_checking_for_followup_turn() -> None:
     clips = RecordingClips(latency_s=0.0)
     services.clips = clips
 
-    orch = Orchestrator(queue, services)
+    orch = _tutor_only_orchestrator(queue, services)
     runner = asyncio.create_task(orch.run())
 
     try:
@@ -394,7 +416,7 @@ async def test_reply_ready_waits_for_clip_to_finish() -> None:
     clips = RecordingClips(latency_s=0.2)
     services.clips = clips
 
-    orch = Orchestrator(queue, services)
+    orch = _tutor_only_orchestrator(queue, services)
 
     reply_ready_at: list[float] = []
     orch.add_listener(
@@ -447,7 +469,7 @@ async def test_gemma_failure_cancels_in_flight_clip() -> None:
     clips = RecordingClips(latency_s=2.0)  # would outlast the test if not cancelled
     services.clips = clips
 
-    orch = Orchestrator(queue, services)
+    orch = _tutor_only_orchestrator(queue, services)
     transitions: list[tuple[AppState, AppState, EventType]] = []
     orch.add_listener(
         lambda prev, curr, ev: transitions.append((prev, curr, ev.type))

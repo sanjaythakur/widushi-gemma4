@@ -26,6 +26,40 @@ class GemmaReply:
     voice: str | None = None
 
 
+@dataclass(frozen=True)
+class FreeConvoReply(GemmaReply):
+    """FreeConvoMode reply: chat text + ``start_learning`` intent flag."""
+
+    start_learning: bool = False
+    transcript: str | None = None
+
+
+@dataclass(frozen=True)
+class WordSuggestion(GemmaReply):
+    """VoiceMirrorMode word suggestion (the spoken cue is in ``text``)."""
+
+    word: str = ""
+    example_sentence: str = ""
+    ipa_hint: str | None = None
+
+
+@dataclass(frozen=True)
+class ScoreResult(GemmaReply):
+    """VoiceMirrorMode score: spoken feedback + verdict for the orchestrator."""
+
+    target_word: str = ""
+    transcript: str | None = None
+    verdict: str = "retry"
+
+
+@dataclass(frozen=True)
+class TeachReply(GemmaReply):
+    """VisionMode teaching reply (object + spoken sentence + transcript)."""
+
+    object: str | None = None
+    transcript: str | None = None
+
+
 class GemmaClient:
     """Minimal async client surface that the orchestrator can rely on."""
 
@@ -154,8 +188,217 @@ class GemmaClient:
         response.raise_for_status()
         return await self._reply_from_payload(response.json())
 
+    # ------------------------------------------------------------------
+    # Mode-specific endpoints
+    # ------------------------------------------------------------------
+
+    async def free_convo_turn(
+        self,
+        audio_bytes: bytes,
+        *,
+        filename: str = "turn.wav",
+        content_type: str = "audio/wav",
+    ) -> FreeConvoReply:
+        """Single FreeConvoMode turn -> ``POST /free-convo/turn``."""
+
+        log.debug("gemma.free_convo_turn bytes=%d", len(audio_bytes))
+        if self._stub:
+            await asyncio.sleep(self._latency_s)
+            return FreeConvoReply(
+                text="(stub) I'm here. Want to practise English?",
+                audio_bytes=_silence_wav(),
+                audio_duration_ms=500.0,
+                voice=self._tts_voice,
+                start_learning=False,
+                transcript=None,
+            )
+
+        response = await self._http.post(
+            "/free-convo/turn",
+            data={
+                "tts": "true" if self._tts_enabled else "false",
+                "voice": self._tts_voice,
+            },
+            files={"audio": (filename, audio_bytes, content_type)},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        base = await self._audio_from_payload(payload)
+        return FreeConvoReply(
+            text=base.text,
+            audio_bytes=base.audio_bytes,
+            audio_duration_ms=base.audio_duration_ms,
+            voice=base.voice,
+            start_learning=bool(payload.get("start_learning", False)),
+            transcript=(
+                str(payload["transcript"]) if payload.get("transcript") else None
+            ),
+        )
+
+    async def voice_mirror_suggest(
+        self,
+        *,
+        history: list[str] | None = None,
+        level: str | None = None,
+    ) -> WordSuggestion:
+        """Ask Gemma for the next word to practise -> ``POST /voice-mirror/suggest``."""
+
+        log.debug("gemma.voice_mirror_suggest history=%s level=%s", history, level)
+        if self._stub:
+            await asyncio.sleep(self._latency_s)
+            return WordSuggestion(
+                text="Try saying: apple. AP-uhl.",
+                audio_bytes=_silence_wav(),
+                audio_duration_ms=500.0,
+                voice=self._tts_voice,
+                word="apple",
+                example_sentence="I like apples.",
+                ipa_hint="AP-uhl",
+            )
+
+        body: dict[str, object] = {
+            "tts": self._tts_enabled,
+            "voice": self._tts_voice,
+        }
+        if history:
+            body["history"] = list(history)
+        if level:
+            body["level"] = level
+
+        response = await self._http.post("/voice-mirror/suggest", json=body)
+        response.raise_for_status()
+        payload = response.json()
+        base = await self._audio_from_payload(payload, text_field="prompt_text")
+        return WordSuggestion(
+            text=base.text,
+            audio_bytes=base.audio_bytes,
+            audio_duration_ms=base.audio_duration_ms,
+            voice=base.voice,
+            word=str(payload.get("word", "")),
+            example_sentence=str(payload.get("example_sentence", "")),
+            ipa_hint=(
+                str(payload["ipa_hint"]) if payload.get("ipa_hint") else None
+            ),
+        )
+
+    async def voice_mirror_score(
+        self,
+        audio_bytes: bytes,
+        *,
+        target_word: str,
+        filename: str = "attempt.wav",
+        content_type: str = "audio/wav",
+    ) -> ScoreResult:
+        """Score a pronunciation attempt -> ``POST /voice-mirror/score``."""
+
+        log.debug(
+            "gemma.voice_mirror_score word=%r bytes=%d", target_word, len(audio_bytes)
+        )
+        if self._stub:
+            await asyncio.sleep(self._latency_s)
+            return ScoreResult(
+                text=f"Nice try with '{target_word}'.",
+                audio_bytes=_silence_wav(),
+                audio_duration_ms=500.0,
+                voice=self._tts_voice,
+                target_word=target_word,
+                transcript=target_word,
+                verdict="praise",
+            )
+
+        response = await self._http.post(
+            "/voice-mirror/score",
+            data={
+                "target_word": target_word,
+                "tts": "true" if self._tts_enabled else "false",
+                "voice": self._tts_voice,
+            },
+            files={"audio": (filename, audio_bytes, content_type)},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        base = await self._audio_from_payload(payload, text_field="feedback_text")
+        return ScoreResult(
+            text=base.text,
+            audio_bytes=base.audio_bytes,
+            audio_duration_ms=base.audio_duration_ms,
+            voice=base.voice,
+            target_word=str(payload.get("target_word", target_word)),
+            transcript=(
+                str(payload["transcript"]) if payload.get("transcript") else None
+            ),
+            verdict=str(payload.get("verdict", "retry")).lower(),
+        )
+
+    async def vision_teach_object(
+        self,
+        image_bytes: bytes,
+        audio_bytes: bytes,
+        *,
+        image_filename: str = "frame.jpg",
+        image_content_type: str = "image/jpeg",
+        audio_filename: str = "guess.wav",
+        audio_content_type: str = "audio/wav",
+    ) -> TeachReply:
+        """Teach an English noun from a camera frame + spoken guess
+        -> ``POST /vision/teach-object``.
+        """
+
+        log.debug(
+            "gemma.vision_teach_object image=%d audio=%d",
+            len(image_bytes),
+            len(audio_bytes),
+        )
+        if self._stub:
+            await asyncio.sleep(self._latency_s)
+            return TeachReply(
+                text="Yes, this is milk. Say: I drink milk.",
+                audio_bytes=_silence_wav(),
+                audio_duration_ms=500.0,
+                voice=self._tts_voice,
+                object="milk",
+                transcript=None,
+            )
+
+        response = await self._http.post(
+            "/vision/teach-object",
+            data={
+                "tts": "true" if self._tts_enabled else "false",
+                "voice": self._tts_voice,
+            },
+            files={
+                "image": (image_filename, image_bytes, image_content_type),
+                "audio": (audio_filename, audio_bytes, audio_content_type),
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        base = await self._audio_from_payload(payload)
+        return TeachReply(
+            text=base.text,
+            audio_bytes=base.audio_bytes,
+            audio_duration_ms=base.audio_duration_ms,
+            voice=base.voice,
+            object=(str(payload["object"]) if payload.get("object") else None),
+            transcript=(
+                str(payload["transcript"]) if payload.get("transcript") else None
+            ),
+        )
+
     async def _reply_from_payload(self, payload: dict[str, object]) -> GemmaReply:
-        text = str(payload.get("text", ""))
+        return await self._audio_from_payload(payload)
+
+    async def _audio_from_payload(
+        self, payload: dict[str, object], *, text_field: str = "text"
+    ) -> GemmaReply:
+        """Build a :class:`GemmaReply` from a TTS-attached JSON payload.
+
+        ``text_field`` lets callers point at endpoint-specific text keys
+        (``"prompt_text"`` for ``/voice-mirror/suggest``,
+        ``"feedback_text"`` for ``/voice-mirror/score``).
+        """
+
+        text = str(payload.get(text_field, "") or payload.get("text", ""))
         audio_url = payload.get("audio_url")
         audio_error = payload.get("audio_error")
         voice = payload.get("voice")

@@ -74,3 +74,5 @@ docker-compose.override.yml
 *.swp
 *.swo
 *~
+
+spec-new.md

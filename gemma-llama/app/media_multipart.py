@@ -21,6 +21,7 @@ import base64
 import io
 import json
 import logging
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -30,10 +31,28 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Gemma 4's vision tower tiles at 896 px. Anything larger is wasted bandwidth
-# and Pi RAM; smaller is fine but loses detail in handwritten work.
-_MAX_IMAGE_EDGE = 896
-_JPEG_QUALITY = 88
+
+def _resolve_image_edge() -> int:
+    """Pick the longest-edge cap for uploaded images.
+
+    Default 896 matches Gemma 4's native vision tile (no wasted pixels). Drop
+    to 512 via ``IMAGE_MAX_EDGE=512`` when the camera feed is the bottleneck
+    on Pi 5 -- handwriting / fine OCR loses detail, but a typical "what
+    object is this?" classification is still accurate and prefill is ~3x
+    faster. Bump only on hosts with a real GPU.
+    """
+    raw = os.environ.get("IMAGE_MAX_EDGE", "896").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("IMAGE_MAX_EDGE=%r is not an int; falling back to 896", raw)
+        return 896
+    # Hard floor / ceiling so a typo cannot disable the resize entirely.
+    return max(64, min(value, 4096))
+
+
+_MAX_IMAGE_EDGE = _resolve_image_edge()
+_JPEG_QUALITY = int(os.environ.get("IMAGE_JPEG_QUALITY", "88") or 88)
 
 # mtmd's Gemma 4 audio path expects mono 16 kHz PCM. Hard-coding both keeps
 # the conversion cheap and predictable on the Pi.

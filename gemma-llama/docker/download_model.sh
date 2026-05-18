@@ -16,6 +16,7 @@ set -euo pipefail
 : "${MODEL_DIR:=/models}"
 : "${MODEL_PATH:=/models/model.gguf}"
 : "${MMPROJ_PATH:=/models/mmproj.gguf}"
+: "${DRAFT_PATH:=/models/draft.gguf}"
 : "${MIN_BYTES:=1048576}"   # 1 MiB sanity floor for a usable GGUF
 
 mkdir -p "$MODEL_DIR"
@@ -117,6 +118,21 @@ if [ -z "${MODEL_REPO:-}" ] || [ -z "${MODEL_FILE:-}" ]; then
 fi
 
 download "$MODEL_REPO" "$MODEL_FILE" "$MODEL_PATH"
+
+if [ -n "${DRAFT_REPO:-}" ] && [ -n "${DRAFT_FILE:-}" ]; then
+    # Draft model for speculative decoding. Optional: if the configured file
+    # is missing on the hub, warn and keep going without spec-decode (the
+    # llama-server CMD silently drops `--model-draft` when the file is absent).
+    if ! ( download "$DRAFT_REPO" "$DRAFT_FILE" "$DRAFT_PATH" ); then
+        log "WARN: draft model download failed for $DRAFT_REPO/$DRAFT_FILE; continuing without speculative decoding"
+        rm -f "$DRAFT_PATH" "${DRAFT_PATH}.source"
+    fi
+else
+    log "no DRAFT_REPO/DRAFT_FILE configured; skipping speculative-decoding draft model"
+    # Clean up any leftover draft from a previous configuration so it does not
+    # silently get loaded after the user has disabled spec-decode.
+    rm -f "$DRAFT_PATH" "${DRAFT_PATH}.source"
+fi
 
 if [ -n "${MMPROJ_REPO:-}" ] && [ -n "${MMPROJ_FILE:-}" ]; then
     # The mmproj projector is optional: if the configured file is missing on
