@@ -60,8 +60,12 @@ pre-generated-clips/models/.hf-cache/
 # Scripted TTS outputs (see pre-generated-clips/README.md).
 pre-generated-clips/clips/
 
-# Gemma LLM service: evaluation reports produced by tooling.
-gemma-llama/eval/reports/*.json
+# Generated playground preset media for gemma-llama. The manifest + READMEs
+# are tracked; the raw WAV/JPG assets stay local because they can be
+# regenerated via `make presets` in pre-generated-clips/ (audio) or sourced
+# manually (4 vision-teach images). See gemma-llama/.gitignore for the
+# per-folder patterns -- the nested .gitignore owns this subtree so the
+# rules live next to the data.
 
 # --- Docker ---
 docker-compose.override.yml

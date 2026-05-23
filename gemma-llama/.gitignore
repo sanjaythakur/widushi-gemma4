@@ -25,8 +25,16 @@ voices/
 # Generated TTS outputs
 tts_outputs/
 
-# Eval reports (generated)
-eval/reports/*.json
+# Playground preset media -- the manifest is committed, the raw assets are
+# personal/large and stay local. `.gitkeep` files keep the empty subdirs.
+api-presets/free-convo/*.wav
+api-presets/voice-mirror-score/*.wav
+api-presets/vision-teach/*.jpg
+api-presets/vision-teach/*.jpeg
+api-presets/vision-teach/*.png
+api-presets/vision-teach/*.webp
+api-presets/vision-teach/*.wav
+api-presets/audio-listen/*.wav
 
 # IDE / OS
 .DS_Store

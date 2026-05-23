@@ -1,0 +1,132 @@
+{
+  "free-convo/turn": [
+    {
+      "id": "teach-me-english",
+      "label": "Hindi: \"Mujhe English sikha do\" (expects start_learning=true)",
+      "files": { "audio": "free-convo/teach-me-english.wav" }
+    },
+    {
+      "id": "casual-greeting-hindi",
+      "label": "Hindi greeting: \"Namaste, aap kaise hain?\" (start_learning=false)",
+      "files": { "audio": "free-convo/greeting-hindi.wav" }
+    },
+    {
+      "id": "english-i-want-to-learn",
+      "label": "English: \"I want to learn English\" (expects start_learning=true)",
+      "files": { "audio": "free-convo/i-want-to-learn-english.wav" }
+    },
+    {
+      "id": "hinglish-chit-chat",
+      "label": "Hinglish: \"Aaj mausam achha hai, kya scene hai?\" (start_learning=false)",
+      "files": { "audio": "free-convo/hinglish-chitchat.wav" }
+    }
+  ],
+
+  "voice-mirror/suggest": [
+    {
+      "id": "beginner-fresh",
+      "label": "Beginner, fresh session (no history)",
+      "body": { "level": "beginner", "history": [] }
+    },
+    {
+      "id": "beginner-mid-session",
+      "label": "Beginner, mid-session (avoid apple/water/book)",
+      "body": { "level": "beginner", "history": ["apple", "water", "book"] }
+    },
+    {
+      "id": "intermediate",
+      "label": "Intermediate learner, 6 words in",
+      "body": { "level": "intermediate", "history": ["river", "kitchen", "morning", "shoe", "window", "bottle"] }
+    },
+    {
+      "id": "no-hints",
+      "label": "No hints at all (model picks freely)",
+      "body": {}
+    }
+  ],
+
+  "voice-mirror/score": [
+    {
+      "id": "apple-clean",
+      "label": "Clean US-English \"Apple\" (expected verdict: praise)",
+      "form": { "target_word": "apple" },
+      "files": { "audio": "voice-mirror-score/apple-clean.wav" }
+    },
+    {
+      "id": "apple-accented",
+      "label": "Indian-accented \"Apple\" (expected verdict: correct)",
+      "form": { "target_word": "apple" },
+      "files": { "audio": "voice-mirror-score/apple-accented.wav" }
+    },
+    {
+      "id": "apple-wrong",
+      "label": "Said \"angoor\" (grape) instead of \"apple\" (expected verdict: retry)",
+      "form": { "target_word": "apple" },
+      "files": { "audio": "voice-mirror-score/apple-wrong-word.wav" }
+    },
+    {
+      "id": "river-mumbled",
+      "label": "Mumbled / unclear \"river\" (expected verdict: retry)",
+      "form": { "target_word": "river" },
+      "files": { "audio": "voice-mirror-score/river-mumbled.wav" }
+    }
+  ],
+
+  "vision/teach-object": [
+    {
+      "id": "milk-doodh",
+      "label": "Milk bottle + Hindi guess \"doodh\"",
+      "files": {
+        "image": "vision-teach/milk.jpg",
+        "audio": "vision-teach/milk-doodh.wav"
+      }
+    },
+    {
+      "id": "apple-correct",
+      "label": "Apple + correct English guess \"Apple\"",
+      "files": {
+        "image": "vision-teach/apple.jpg",
+        "audio": "vision-teach/apple-guess.wav"
+      }
+    },
+    {
+      "id": "book-kitaab",
+      "label": "Book + Hindi guess \"kitaab\"",
+      "files": {
+        "image": "vision-teach/book.jpg",
+        "audio": "vision-teach/book-kitaab.wav"
+      }
+    },
+    {
+      "id": "cup-wrong-guess",
+      "label": "Cup + wrong English guess \"Plate\"",
+      "files": {
+        "image": "vision-teach/cup.jpg",
+        "audio": "vision-teach/cup-wrong-guess.wav"
+      }
+    }
+  ],
+
+  "audio/listen": [
+    {
+      "id": "what-time-is-it",
+      "label": "English: \"What time is it?\" (general spoken question)",
+      "files": { "audio": "audio-listen/what-time-is-it.wav" }
+    },
+    {
+      "id": "roleplay-shopkeeper-greeting",
+      "label": "RolePlay: shopkeeper scene -- \"Hello, I want to buy something\"",
+      "files": { "audio": "audio-listen/roleplay-shopkeeper-greeting.wav" }
+    },
+    {
+      "id": "roleplay-doctor-symptom",
+      "label": "RolePlay: doctor scene -- \"I have a headache\"",
+      "files": { "audio": "audio-listen/roleplay-doctor-headache.wav" }
+    },
+    {
+      "id": "hinglish-question",
+      "label": "Hinglish: \"Yeh English mein kya hai?\"",
+      "files": { "audio": "audio-listen/hinglish-question.wav" }
+    }
+  ]
+}

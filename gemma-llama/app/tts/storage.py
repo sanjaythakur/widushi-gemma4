@@ -1,7 +1,9 @@
 """Disk-backed cache for ``audio_url``-style TTS outputs.
 
-Long-form endpoints (``/generate``, ``/chat``, ``/summarize``, ...) write the
-full WAV to ``${TTS_OUTPUT_DIR}/<uuid>.wav`` and return a URL pointing at
+Every mode endpoint that returns JSON (``/free-convo/turn``,
+``/voice-mirror/suggest``, ``/voice-mirror/score``, ``/vision/teach-object``,
+``/audio/listen`` non-streaming) writes the full WAV to
+``${TTS_OUTPUT_DIR}/<uuid>.wav`` and returns a URL pointing at
 ``GET /tts/output/{id}.wav``. A background janitor evicts files older than
 ``ttl_seconds`` so the directory does not grow without bound under 24/7
 operation on Pi 5.

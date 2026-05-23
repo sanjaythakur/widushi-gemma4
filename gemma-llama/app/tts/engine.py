@@ -151,7 +151,7 @@ class PiperEngine:
         return self._ready
 
     def available_voices(self) -> list[dict[str, object]]:
-        """Return the registry as JSON-serialisable dicts for ``/tts/voices``."""
+        """Return the registry as JSON-serialisable dicts (debug/introspection)."""
         out: list[dict[str, object]] = []
         for key, voice in PERSONALITIES.items():
             cached = self._voice_cache.get(key)

@@ -66,6 +66,13 @@ def _parse_free_convo(raw: str) -> dict[str, object]:
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
+        # Same Pi-5 failure mode as voice-mirror/vision: a `<think>`
+        # preamble truncated at max_tokens leaves us with nothing to
+        # parse. Log the raw response so the operator can diagnose
+        # without redeploying with extra prints.
+        logger.warning(
+            "free-convo/turn: JSON parse failed; raw=%r", raw[:400]
+        )
         return {
             "text": raw.strip() or "I'm here. Could you say that again?",
             "transcript": None,
@@ -103,7 +110,7 @@ async def free_convo_turn(
     max_tokens: int | None = Form(None, ge=1, le=4096),
     temperature: float | None = Form(None, ge=0.0, le=2.0),
     tts: bool = Form(False, description="If true, also render the reply via Piper TTS."),
-    voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see GET /tts/voices)."),
+    voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see app/tts/voices.py)."),
     adapter: LlamaAdapter = Depends(get_adapter),
     cfg: ModelConfig = Depends(get_model_config),
     tts_engine: PiperEngine | None = Depends(get_tts_engine),

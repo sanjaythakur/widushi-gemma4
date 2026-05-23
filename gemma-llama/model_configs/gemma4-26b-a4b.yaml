@@ -29,40 +29,12 @@ modalities:
 defaults:
   max_tokens: 1024
   temperature: 0.7
-  # Off by default; opt in via the per-endpoint `thinking` parameter.
+  # Off by default; /audio/listen exposes a per-request `thinking` field.
   thinking: false
 
-prompts:
-  classify: |
-    You are a precise text classifier. Given the input text and the list of
-    candidate labels, choose {{ "one or more labels" if multi_label else "exactly one label" }}.
-    Respond ONLY with a JSON object of the form:
-      {"labels": ["label_a"{% if multi_label %}, "label_b"{% endif %}]}
-
-    Allowed labels: {{ labels | tojson }}
-
-    Text:
-    """
-    {{ text }}
-    """
-  extract: |
-    You are a structured-data extractor. Read the text below and produce a
-    single JSON object that exactly matches the requested schema. Use null for
-    any field that cannot be confidently extracted. Do NOT include any prose,
-    code fences, or commentary.
-
-    Schema:
-    {{ schema | tojson }}
-
-    Text:
-    """
-    {{ text }}
-    """
-  summarize: |
-    Summarize the following text{% if style %} in a {{ style }} style{% endif %}.
-    Be faithful, concise, and self-contained. Aim for {{ max_sentences }} sentences.
-
-    Text:
-    """
-    {{ text }}
-    """
+# This config disables `modalities.audio`, so the four audio-bearing mode
+# endpoints (`/free-convo/turn`, `/voice-mirror/score`, `/vision/teach-object`,
+# `/audio/listen`) will return 409. Only `/voice-mirror/suggest` (text-only)
+# is usable here.
+#
+# Prompts intentionally omitted -- defaults in app/model_config.py work.

@@ -1,18 +1,13 @@
-"""Audio tutor endpoints.
+"""Audio tutor endpoint.
 
-* ``POST /audio/listen`` -- "The Classroom Ear". Student speaks a question;
-  Gemma 4 listens (via the natively-supported audio path that landed in
-  llama.cpp in early April 2026) and replies in text. Supports optional
-  NDJSON streaming via ``stream=true``.
-* ``POST /audio/translate`` -- audio in language A, text in language B.
-  Gemma 4's instruct training covers 35+ languages out of the box.
-* ``POST /audio/transcribe`` -- verbatim speech-to-text in the source
-  language. Defaults to ``temperature=0`` and ``thinking=false`` for
-  determinism.
+* ``POST /audio/listen`` -- "The Classroom Ear" (and Widushi's RolePlayMode
+  driver). The learner speaks a question; Gemma 4 listens (via the natively-
+  supported audio path that landed in llama.cpp in early April 2026) and
+  replies in text. Supports optional NDJSON streaming via ``stream=true``.
 
-All routes accept ``multipart/form-data`` only. The uploaded audio is
-transcoded once to mono 16 kHz WAV (the format mtmd's Gemma 4 audio encoder
-consumes) by :func:`app.media_multipart.read_audio_upload`.
+Accepts ``multipart/form-data`` only. The uploaded audio is transcoded once
+to mono 16 kHz WAV (the format mtmd's Gemma 4 audio encoder consumes) by
+:func:`app.media_multipart.read_audio_upload`.
 """
 from __future__ import annotations
 
@@ -30,22 +25,10 @@ from ..llama_adapter import LlamaAdapter, extract_content, extract_usage
 from ..media import build_user_content
 from ..media_multipart import read_audio_upload
 from ..model_config import ModelConfig
-from ..prompts import (
-    render_audio_listen_prompt,
-    render_audio_transcribe_prompt,
-    render_audio_translate_prompt,
-)
-from ..schemas import (
-    AudioListenResponse,
-    AudioTranscribeResponse,
-    AudioTranslateResponse,
-)
+from ..prompts import render_audio_listen_prompt
+from ..schemas import AudioListenResponse
 from ..tts import PiperEngine
-from ..tts._router_helpers import (
-    maybe_attach_file,
-    maybe_attach_inline,
-    maybe_wrap_stream,
-)
+from ..tts._router_helpers import maybe_attach_file, maybe_wrap_stream
 from ..tts.storage import TTSStorage
 from ..tts.voices import DEFAULT_PERSONALITY
 
@@ -149,7 +132,7 @@ async def listen(
     ),
     stream: bool = Form(False, description="Stream NDJSON tokens instead of waiting for the full response."),
     tts: bool = Form(False, description="If true, also render the answer via Piper TTS."),
-    voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see GET /tts/voices)."),
+    voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id."),
     adapter: LlamaAdapter = Depends(get_adapter),
     cfg: ModelConfig = Depends(get_model_config),
     tts_engine: PiperEngine | None = Depends(get_tts_engine),
@@ -213,139 +196,6 @@ async def listen(
         storage=tts_storage,
     )
     return AudioListenResponse(
-        text=text,
-        model=cfg.short_name,
-        inference_time_ms=response.get("_inference_time_ms", 0.0),
-        usage=extract_usage(response),
-        **tts_attach,
-    )
-
-
-@router.post(
-    "/audio/translate",
-    response_model=AudioTranslateResponse,
-    summary="Translate spoken audio in language A to text in language B",
-)
-async def translate(
-    audio: UploadFile = File(..., description="Recording in the source language."),
-    target_language: str = Form(
-        ..., description="Target language name or BCP-47 code, e.g. 'English' or 'es'."
-    ),
-    source_language: str | None = Form(
-        None, description="Optional source language hint to disambiguate."
-    ),
-    max_tokens: int | None = Form(None, ge=1, le=4096),
-    temperature: float | None = Form(None, ge=0.0, le=2.0),
-    tts: bool = Form(False, description="If true, also render the translation via Piper TTS."),
-    voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see GET /tts/voices)."),
-    adapter: LlamaAdapter = Depends(get_adapter),
-    cfg: ModelConfig = Depends(get_model_config),
-    tts_engine: PiperEngine | None = Depends(get_tts_engine),
-):
-    _require_audio(cfg)
-
-    audio_url = await read_audio_upload(audio)
-
-    system_prompt = render_audio_translate_prompt(
-        cfg,
-        target_language=target_language,
-        source_language=source_language,
-    )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": build_user_content(
-                f"Translate this audio into {target_language}.",
-                audio_urls=[audio_url],
-            ),
-        },
-    ]
-
-    try:
-        response = await adapter.chat_completion(
-            messages,
-            max_tokens=max_tokens or cfg.defaults.max_tokens,
-            temperature=temperature if temperature is not None else 0.2,
-            thinking=False,
-        )
-    except LlamaServerError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    text = extract_content(response).strip()
-    tts_attach = await maybe_attach_inline(
-        text,
-        enabled=tts,
-        voice=voice,
-        engine=tts_engine,
-    )
-    return AudioTranslateResponse(
-        text=text,
-        target_language=target_language,
-        source_language=source_language,
-        model=cfg.short_name,
-        inference_time_ms=response.get("_inference_time_ms", 0.0),
-        usage=extract_usage(response),
-        **tts_attach,
-    )
-
-
-@router.post(
-    "/audio/transcribe",
-    response_model=AudioTranscribeResponse,
-    summary="Verbatim speech-to-text (no translation, no commentary)",
-)
-async def transcribe(
-    audio: UploadFile = File(..., description="Recording to transcribe verbatim."),
-    max_tokens: int | None = Form(None, ge=1, le=4096),
-    temperature: float | None = Form(
-        None,
-        ge=0.0,
-        le=2.0,
-        description="Defaults to 0.0 for deterministic transcripts.",
-    ),
-    tts: bool = Form(False, description="If true, also render the transcript via Piper TTS."),
-    voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see GET /tts/voices)."),
-    adapter: LlamaAdapter = Depends(get_adapter),
-    cfg: ModelConfig = Depends(get_model_config),
-    tts_engine: PiperEngine | None = Depends(get_tts_engine),
-    tts_storage: TTSStorage | None = Depends(get_tts_storage),
-):
-    _require_audio(cfg)
-
-    audio_url = await read_audio_upload(audio)
-
-    system_prompt = render_audio_transcribe_prompt(cfg)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": build_user_content(
-                "Transcribe this audio verbatim.",
-                audio_urls=[audio_url],
-            ),
-        },
-    ]
-
-    try:
-        response = await adapter.chat_completion(
-            messages,
-            max_tokens=max_tokens or cfg.defaults.max_tokens,
-            temperature=temperature if temperature is not None else 0.0,
-            thinking=False,
-        )
-    except LlamaServerError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    text = extract_content(response).strip()
-    tts_attach = await maybe_attach_file(
-        text,
-        enabled=tts,
-        voice=voice,
-        engine=tts_engine,
-        storage=tts_storage,
-    )
-    return AudioTranscribeResponse(
         text=text,
         model=cfg.short_name,
         inference_time_ms=response.get("_inference_time_ms", 0.0),

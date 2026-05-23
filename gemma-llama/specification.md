@@ -2,8 +2,7 @@
 
 This document is the source-of-truth for `gemma-llama`. A reimplementation
 that follows the contracts and defaults below should be functionally
-equivalent to the current code in `app/`, `docker/`, `model_configs/`, and
-`eval/`.
+equivalent to the current code in `app/`, `docker/`, and `model_configs/`.
 
 For long-form prose see [`docs/README.md`](docs/README.md) (operator guide)
 and [`docs/endpoints.md`](docs/endpoints.md) (HTTP surface).
@@ -16,16 +15,18 @@ dense) that:
 
 - Runs as a two-container Docker Compose stack (`llama` + `api`).
 - Wraps `ggml-org/llama.cpp`'s OpenAI-compatible `llama-server`.
-- Exposes a small, opinionated FastAPI HTTP surface positioned as a
-  **personal educational tutor** (homework checker, classroom ear,
-  translator, lab assistant) on top of generic text/classify/extract/
-  summarize endpoints.
-- Supports **text, image, audio, and video** inputs through Gemma 4's
-  unified vision/audio projector (default `mmproj-F16.gguf`, with
+- Exposes a small, opinionated FastAPI HTTP surface — exactly **five
+  mode-specific tutor endpoints** (`/free-convo/turn`,
+  `/voice-mirror/suggest`, `/voice-mirror/score`, `/vision/teach-object`,
+  `/audio/listen`) — that back the four interaction modes of the Widushi
+  on-device English tutor (FreeConvo, VoiceMirror, Vision, RolePlay).
+- Supports **image + audio** inputs through Gemma 4's unified
+  vision/audio projector (default `mmproj-F16.gguf`, with
   `mmproj-BF16.gguf` / `mmproj-F32.gguf` also available) shipped inside
-  Unsloth's GGUF repos. Audio + video are gated to E2B/E4B (the only
-  variants Google released audio adapters for).
-- Includes opt-in **Piper TTS** so any endpoint can also return audio.
+  Unsloth's GGUF repos. Audio is gated to E2B/E4B (the only variants
+  Google released audio adapters for).
+- Includes opt-in **Piper TTS** so any mode endpoint can also return the
+  spoken WAV alongside the JSON reply.
 - Targets:
   - Raspberry Pi 5 16 GB (`aarch64`, CPU-only) -- production, 24/7.
   - Apple Silicon -- development, no Docker GPU.
@@ -84,12 +85,15 @@ Client
  │
 FastAPI (host :8010, container :8000)         ── api container
  │   middleware: timing + structured logging
- │   routers: /generate /chat /classify /extract /summarize
- │            /vision/* /audio/* /video/* /tts/*
+ │   routers: /free-convo/turn
+ │            /voice-mirror/suggest /voice-mirror/score
+ │            /vision/teach-object
+ │            /audio/listen
  │
 LlamaAdapter  (httpx → /v1/chat/completions, NDJSON streaming, retries)
  │
-Piper subprocess pool (TTS, opt-in via tts=true)
+Piper subprocess pool (TTS, opt-in via tts=true; backs the audio_url
+                       attach shape returned by every mode endpoint)
  │
 llama-server (container :8080)                 ── llama container
  │   --jinja --mmproj <unified vision+audio projector>
@@ -134,10 +138,10 @@ Default: **`gemma4-e4b.yaml`** (Gemma 4 E4B it, Q4_0 on Pi 5; switch to Q4_K_M o
 
 | Config file | Display | Modalities | RAM | Notes |
 |-------------|---------|------------|-----|-------|
-| `gemma4-e4b.yaml` | Gemma 4 E4B (it) | text, image, audio, video | ~6 GB | **Default.** Pi-5-friendly. |
-| `gemma4-e2b.yaml` | Gemma 4 E2B (it) | text, image, audio, video | ~4 GB | Lighter Pi sibling. |
-| `gemma4-26b-a4b.yaml` | Gemma 4 26B A4B (it) | text, image | ~16 GB | MoE; no audio/video. |
-| `gemma4-31b.yaml` | Gemma 4 31B (it) | text, image | ~20 GB | Dense; GPU recommended. |
+| `gemma4-e4b.yaml` | Gemma 4 E4B (it) | text, image, audio | ~6 GB | **Default.** Pi-5-friendly. Backs all five mode endpoints. |
+| `gemma4-e2b.yaml` | Gemma 4 E2B (it) | text, image, audio | ~4 GB | Lighter Pi sibling. Same modality coverage. |
+| `gemma4-26b-a4b.yaml` | Gemma 4 26B A4B (it) | text, image | ~16 GB | MoE; no audio. Only `/voice-mirror/suggest` works on this config; the four audio-bearing endpoints return `409`. |
+| `gemma4-31b.yaml` | Gemma 4 31B (it) | text, image | ~20 GB | Dense; GPU recommended. Same `409` caveat as 26B-A4B. |
 
 Each YAML includes:
 
@@ -148,9 +152,10 @@ mmproj_repo, mmproj_file      # unified vision+audio projector (optional)
 context_size, threads, gpu_layers
 modalities: { text, image, audio, video }
 defaults:   { max_tokens, temperature, thinking }
-prompts:    { classify, extract, summarize,
-              vision_explain, audio_listen, audio_translate,
-              audio_transcribe, video_lab }   # Jinja2 templates
+prompts:    { free_convo,
+              voice_mirror_suggest, voice_mirror_score,
+              vision_teach,
+              audio_listen }                  # Jinja2 templates
 ```
 
 Sensible defaults for every prompt template exist in
@@ -162,56 +167,52 @@ All routes live at the root, served on host port `${API_PORT:-8010}`
 (container port `8000`). Every successful response includes
 `inference_time_ms` and an `X-Process-Time-Ms` header on the HTTP response.
 
+The HTTP surface is intentionally narrow: five mode-specific endpoints
+that back the four Widushi interaction modes (FreeConvo, VoiceMirror,
+Vision, RolePlay), plus two operational routes. Every endpoint accepts
+the optional `tts` / `voice` fields and returns an `audio_url` to a
+Piper-rendered WAV when `tts=true`.
+
 ### 6.1 Core
 
 - `GET /` -- HTML playground (`app/templates/playground.html`).
 - `GET /health` -- `{"status","model","llama_server_reachable","tts_ready"}`;
   HTTP 503 when llama is unreachable.
 
-### 6.2 Text
+### 6.2 Mode endpoints
 
-| Method | Path | Body | Notes |
-|--------|------|------|-------|
-| `POST` | `/generate` | `prompt`, optional `system`, `images`, `max_tokens`, `temperature`, `thinking`, `stream`, `tts`, `voice` | Single-prompt generation. Streams NDJSON when `stream=true`. |
-| `POST` | `/chat`     | `messages[{role,content,images?}]`, same opts as above | Multi-turn chat with per-message images. |
-| `POST` | `/classify` | `text`, `labels[]`, `multi_label` | `response_format={"type":"json_object"}`; returns `{labels, raw}`. |
-| `POST` | `/extract`  | `text`, `schema` | JSON-schema-style extraction. Tolerates malformed JSON via `_raw`/`_error` (or `data._error`). |
-| `POST` | `/summarize`| `text`, `style?`, `max_sentences` | Abstractive summarization. |
+| Method | Path | Body / form fields | Mode |
+|--------|------|--------------------|------|
+| `POST` | `/free-convo/turn` | multipart: `audio`, `max_tokens?`, `temperature?`, `tts?`, `voice?` | **FreeConvoMode.** Audio in → reply text + `start_learning` boolean (JSON, with keyword fallback). Defaults: `temperature=0.4`, `thinking=false`, `max_tokens=cfg.defaults.max_tokens` (YAML, 512). |
+| `POST` | `/voice-mirror/suggest` | JSON: `level?`, `history?` (string[]), `tts?`, `voice?` | **VoiceMirrorMode (pick word).** Returns `{word, example_sentence, ipa_hint?, prompt_text}`. Fixed `temperature=0.7`, `thinking=false`, `max_tokens=512` (no caller override — text-only and short). |
+| `POST` | `/voice-mirror/score` | multipart: `audio`, `target_word`, `max_tokens?`, `temperature?`, `tts?`, `voice?` | **VoiceMirrorMode (score attempt).** Returns `{target_word, transcript?, verdict ∈ {praise, correct, retry}, feedback_text}`. Defaults: `temperature=0.2`, `thinking=false`, `max_tokens=512`. |
+| `POST` | `/vision/teach-object` | multipart: `image`, `audio`, `max_tokens?`, `temperature?`, `tts?`, `voice?` | **VisionMode.** Camera frame + spoken guess → teaching line. Three-branch behaviour in the system prompt — confirms a correct guess (`"Yes, this is apple. Say: I eat an apple."`), corrects a wrong one (`"This is cup, not plate. Say: I drink from a cup."`), or names the object anyway when the guess is unintelligible. Returns `{text, object?, transcript?}`. Defaults: `temperature=0.3`, `thinking=false`, **`max_tokens=1024`** (large because this endpoint has the most prompt context — image + audio + strict JSON schema — and absorbs any `<think>` bleed from Gemma 4's chat template). |
+| `POST` | `/audio/listen` | multipart: `audio`, `max_tokens?`, `temperature?`, `thinking?`, `stream?`, `tts?`, `voice?` | **RolePlayMode / default `Mode.run_thinking` fallback.** Audio in → text answer. Defaults: `temperature=cfg.defaults.temperature`, `thinking=false` (caller-toggleable), `max_tokens=cfg.defaults.max_tokens` (YAML). Only endpoint that streams (`stream=true` → NDJSON with `heartbeat` markers). |
 
-### 6.3 Multimodal tutor (multipart/form-data)
+Modality gating:
 
-| Method | Path | Form fields | Tutor role |
-|--------|------|-------------|------------|
-| `POST` | `/vision/explain-work` | `image`, `question?`, `subject?`, `max_tokens?`, `temperature?`, `tts?`, `voice?` | The Homework Checker. |
-| `POST` | `/audio/listen` | `audio`, `max_tokens?`, `temperature?`, `stream?`, `tts?`, `voice?` | The Classroom Ear (NDJSON streaming supported). |
-| `POST` | `/audio/translate` | `audio`, `target_language`, `source_language?`, `max_tokens?`, `temperature?`, `tts?`, `voice?` | Audio in language A → text in B. Defaults `temperature=0.2`, `thinking=false`. |
-| `POST` | `/audio/transcribe`| `audio`, `max_tokens?`, `temperature?`, `tts?`, `voice?` | Verbatim STT. Defaults `temperature=0.0`, `thinking=false`. |
-| `POST` | `/video/analyze-process` | `video`, `task?`, `n_frames?`, `include_audio?`, `max_tokens?`, `temperature?`, `stream?`, `tts?`, `voice?` | The Lab Assistant. Returns JSON-shaped `{summary, observations, safety_notes, next_step}`. |
+- The four audio-bearing endpoints (`/free-convo/turn`,
+  `/voice-mirror/score`, `/vision/teach-object`, `/audio/listen`) return
+  `409 Conflict` when the active config has `modalities.audio: false`
+  (26B-A4B, 31B).
+- `/vision/teach-object` additionally requires `modalities.image: true`
+  (every shipped config satisfies this; the check exists for forward
+  compatibility).
+- `/voice-mirror/suggest` is text-only and works on every config.
 
-Modality gating: a `409 Conflict` is returned when an audio/video route is
-hit on a model whose `modalities.audio` / `modalities.video` is `false`
-(26B-A4B, 31B).
+All four JSON-shaped routes (`/free-convo/turn`, `/voice-mirror/*`,
+`/vision/teach-object`) set `response_format={"type":"json_object"}` on
+the llama.cpp call and parse defensively — a malformed completion falls
+back to a deterministic shape so the endpoint never 500s on a bad reply.
 
-### 6.4 TTS subsystem
+### 6.3 Streaming format (NDJSON, `/audio/listen` only)
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET`  | `/tts/voices` | List curated personalities (id, description, language, voice_id, downloaded, sample_rate, is_default). |
-| `GET`  | `/tts/output/{audio_id}.wav` | Serve a previously-rendered WAV from the TTL cache. 404 once expired. |
-| `POST` | `/tts/speak` | One-shot Piper synth from `{text, voice}`. |
-
-Curated personalities (in `app/tts/voices.py`): `warm-academic` (default),
-`friendly-casual`, `neutral-news`, `energetic-kid`, `calm-storyteller`.
-Each maps to a Piper ONNX voice from `rhasspy/piper-voices`.
-
-### 6.5 Streaming format (NDJSON)
-
-`stream=true` returns `application/x-ndjson`; one JSON object per line:
+`/audio/listen` with `stream=true` returns `application/x-ndjson`; one
+JSON object per line. No other mode endpoint streams.
 
 ```json
 {"type": "thinking",  "content": "..."}
 {"type": "text",      "content": "..."}
-{"type": "meta",      "frames_used": 6, "audio_used": true, "duration_s": 11.4}
 {"type": "heartbeat", "elapsed_ms": 5000}
 {"type": "audio",     "seq": 1, "sentence": "...", "content": "<base64-wav>", "mime": "audio/wav", "sample_rate": 22050, "voice": "warm-academic"}
 {"type": "audio_error","content": "..."}
@@ -220,36 +221,72 @@ Each maps to a Piper ONNX voice from `rhasspy/piper-voices`.
 
 - `thinking` lines are emitted when the model exposes `reasoning_content`
   / `reasoning` in deltas, or via inline `<think>...</think>` spans.
-- `heartbeat` lines (every 5 s) are emitted by `/audio/listen` and
-  `/video/analyze-process` so the HTTP connection (and the user's hope)
-  survives multi-minute multimodal preprocessing on Pi 5.
+- `heartbeat` lines (every 5 s) are emitted so the HTTP connection (and
+  the learner's hope) survives multi-minute audio preprocessing on Pi 5.
 - `audio` lines are only emitted when `tts=true` -- one per completed
   sentence, interleaved with `text` chunks.
-- `meta` is emitted as the first line of `/video/analyze-process` streams.
 
-### 6.6 Thinking toggle
+### 6.4 Thinking toggle
 
-`thinking: true` (default) preserves chain-of-thought in the response
-(separately surfaced as `thinking_content` for non-stream, or `type:
-"thinking"` for stream). `thinking: false` appends `/no_think` to the
-last user message and trims latency.
+Every mode endpoint runs with `thinking=false` by default — chain-of-
+thought roughly doubles decoded tokens on Pi 5 for the same final reply,
+and four of the five endpoints emit short structured JSON where reasoning
+brings no value. Only `/audio/listen` exposes a `thinking` form field for
+callers who want to opt in on harder spoken questions; `thinking=true`
+preserves chain-of-thought in the response (`thinking_content` for
+non-stream, `{"type":"thinking"}` lines for stream). `thinking=false`
+appends `/no_think` to the last user message, sets
+`chat_template_kwargs: {"enable_thinking": false}` on the llama.cpp
+payload, and trims latency.
 
-### 6.7 TTS attach shapes (response side)
+**`<think>` bleed (observed on Gemma 4 + llama.cpp `b8837`).** Despite
+both anti-thinking signals above, the Gemma 4 chat template still
+occasionally emits an opening `<think>…` that runs until `max_tokens`
+without ever closing or producing JSON. `extract_content` drops any
+unterminated `<think>` tail (returning `""`), so parsers on the four
+JSON-shaped endpoints would then fall back to a deterministic stub
+("I couldn't quite hear that", "Let's try again. Hold the object
+steady.", …). Two countermeasures keep this rare:
 
-Three response shapes, picked per endpoint based on expected audio length:
+- The default system prompts for `/free-convo/turn` and
+  `/voice-mirror/*` end with "No commentary, no markdown, no preamble."
+  The default `/vision/teach-object` prompt goes further — it
+  *explicitly* forbids `<think>` blocks and requires the first character
+  of the response to be `{` and the last to be `}` (this endpoint was
+  the worst offender in testing, so it gets the strongest steering).
+- `max_tokens` defaults are inflated above what the JSON alone needs so
+  even a stubborn preamble has room to close and still emit the JSON
+  envelope: `512` for `/free-convo/turn`, `/voice-mirror/suggest`,
+  `/voice-mirror/score`; **`1024` for `/vision/teach-object`** (two
+  media inputs + strict three-branch schema make it the worst offender).
+  When the parsers do fall back, they log the raw model output via
+  `logger.warning` so the failure mode is debuggable from
+  `docker compose logs api`.
 
-- **Inline base64** (`/classify`, `/audio/translate`, `/tts/speak`):
-  `audio_base64`, `audio_mime`, `audio_duration_ms`, `voice` are inlined
-  in the JSON response.
-- **File URL** (`/generate` non-stream, `/chat` non-stream, `/summarize`,
-  `/extract`, `/vision/explain-work`, `/audio/listen` non-stream,
-  `/audio/transcribe`, `/video/analyze-process` non-stream): response
-  carries `audio_url` -> `GET /tts/output/{id}.wav`. Files evicted after
-  `TTS_OUTPUT_TTL_SECONDS`.
-- **Streaming** (`/generate`, `/chat`, `/audio/listen`, `/video/analyze-process`
-  with `stream=true`): per-sentence `{"type":"audio", ...}` NDJSON lines.
+### 6.5 TTS attach (response side)
 
-On any TTS failure the response carries `audio_error: <reason>` instead.
+Piper TTS is opt-in per request via `tts: true` (+ optional `voice`,
+default `warm-academic`). Every mode endpoint uses the **file-URL**
+attach shape on its non-streaming JSON response:
+
+```json
+{"audio_url": "/tts/output/<id>.wav", "audio_duration_ms": 7200.0, "voice": "warm-academic"}
+```
+
+The api container serves those WAVs from a TTL-managed cache
+(`TTS_OUTPUT_DIR`, `TTS_OUTPUT_TTL_SECONDS=600`). The device fetches
+`audio_url` (relative to the api container) and plays the WAV back; the
+cache evicts after the TTL.
+
+`/audio/listen` with `stream=true` instead interleaves per-sentence
+`{"type":"audio", ...}` NDJSON lines (base64 WAV) into the token stream.
+
+On any TTS failure the response carries `audio_error: <reason>` instead
+of audio so callers never have to branch on engine state. The five
+curated personalities (`warm-academic`, `friendly-casual`,
+`neutral-news`, `energetic-kid`, `calm-storyteller`) live in
+`app/tts/voices.py` and map to Piper ONNX voices from
+`rhasspy/piper-voices`.
 
 ## 7. llama.cpp Integration
 
@@ -311,9 +348,11 @@ disabled cleanly (the api container returns 409 on those routes).
 ### llama.cpp HTTP surface used
 
 - `GET /health`
-- `POST /v1/chat/completions` (with `stream` true/false). All endpoints
-  fan in here; `response_format={"type":"json_object"}` is set for
-  `/classify` and `/extract`.
+- `POST /v1/chat/completions` (with `stream` true/false). All five mode
+  endpoints fan in here. `response_format={"type":"json_object"}` is set
+  for `/free-convo/turn`, `/voice-mirror/suggest`, `/voice-mirror/score`,
+  and `/vision/teach-object` so the model emits parseable JSON;
+  `/audio/listen` is free-form text.
 
 ## 8. FastAPI ↔ llama.cpp adapter
 
@@ -367,17 +406,13 @@ Tuned for Pi 5; constants are part of the contract:
 | `_JPEG_QUALITY` | 88 | Re-encode quality. |
 | `_AUDIO_SAMPLE_RATE` | 16000 | mtmd Gemma 4 audio path expects 16 kHz mono WAV. |
 | `_AUDIO_CHANNELS` | 1 | Mono. |
-| `MAX_IMAGE_BYTES` | 10 MiB | Per-upload cap. |
-| `MAX_AUDIO_BYTES` | 25 MiB | Per-upload cap. |
-| `MAX_VIDEO_BYTES` | 75 MiB | Per-upload cap. |
-| `DEFAULT_VIDEO_FRAMES` | 3 | Frames sampled per `/video/analyze-process` call. |
-| `MAX_VIDEO_FRAMES` | 6 | Hard cap (each frame ~ 75 s through the projector on Pi 5 CPU). |
+| `MAX_IMAGE_BYTES` | 10 MiB | Per-upload cap (`/vision/teach-object`). |
+| `MAX_AUDIO_BYTES` | 25 MiB | Per-upload cap (every audio-bearing endpoint). |
 
-Helpers: `read_image_upload`, `read_audio_upload`,
-`extract_video_payload(file, n_frames, include_audio)` -- all return
+Helpers: `read_image_upload`, `read_audio_upload` -- both return
 `data:<mime>;base64,...` URIs (so the rest of the codebase can stay on
-OpenAI-style `image_url` / `input_audio` content parts). One `ffmpeg` /
-`ffprobe` pass per asset.
+OpenAI-style `image_url` / `input_audio` content parts). One `ffmpeg`
+pass per audio asset.
 
 ### Image / audio content part shapes (`app/media.py`)
 
@@ -499,11 +534,11 @@ All settings come from environment variables (typically via `.env`; see
   %(message)s`) with method, path, status, elapsed ms.
 - `X-Process-Time-Ms` header added by the `timing_and_logging`
   middleware.
-- Every endpoint response includes `inference_time_ms` (the llama.cpp
-  round-trip).
-- `/generate` and `/chat` additionally surface `tokens_predicted` and
-  the full `usage` dict (`prompt_tokens`, `completion_tokens`,
-  `total_tokens`, `tokens_predicted`).
+- Every mode-endpoint response includes `inference_time_ms` (the llama.cpp
+  round-trip) and the full `usage` dict (`prompt_tokens`,
+  `completion_tokens`, `total_tokens`, `tokens_predicted`).
+  `/voice-mirror/suggest` omits `usage` because it does not consume audio
+  tokens worth tracking separately.
 
 ## 13. Failure handling
 
@@ -514,9 +549,17 @@ All settings come from environment variables (typically via `.env`; see
   cause; not retried (would restart the encode from zero).
 - 4xx from llama.cpp → not retried; 5xx → retried with exponential
   backoff up to `LLM_RETRIES`.
-- `/extract` JSON parse failures → response includes `_raw` + `_error`
-  keys instead of failing the request.
-- Modality mismatch (audio/video on a vision-only model) → 409.
+- Malformed or empty JSON completions on the four JSON-shaped endpoints
+  (`/free-convo/turn`, `/voice-mirror/*`, `/vision/teach-object`) →
+  parsers fall back to deterministic shapes (keyword-driven
+  `start_learning` on free-convo, default `verdict="retry"` on
+  voice-mirror score, `text="Let's try again. Hold the object steady."`
+  on vision-teach, etc.) so the endpoint never 500s on a bad reply. The
+  raw model output is logged via `logger.warning` on parse failure to
+  make `<think>`-bleed and truncation cases debuggable. See §6.4 for the
+  `max_tokens` headroom that prevents most of these falls.
+- Modality mismatch (audio endpoint on an image-only model) → 409.
+- Empty `target_word` on `/voice-mirror/score` → 422.
 - Multipart caps exceeded → 413; bad media → 400 with the ffmpeg /
   Pillow error.
 - Unknown TTS voice → 422; engine unavailable → endpoint still answers,
@@ -524,57 +567,7 @@ All settings come from environment variables (typically via `.env`; see
 - Model download failure → `download_model.sh` exits non-zero, the llama
   container fails to start (and `api` waits on the healthcheck).
 
-## 14. Evaluation harness (`eval/`)
-
-Runs against a live API (`docker compose up` first).
-
-```bash
-pip install -r requirements-eval.txt
-
-# CLI runner -- writes timestamped JSON into eval/reports/
-python -m eval.runner --all
-python -m eval.runner --task classify   # | extract | summarize | audio | video
-
-# Pytest -- skipped automatically if the API is unreachable
-pytest eval/ -v -s
-```
-
-`requirements-eval.txt`:
-
-```
--r requirements.txt
-pytest>=8.0
-pytest-asyncio>=0.24
-rouge-score>=0.1.2
-```
-
-### Tasks, datasets, thresholds
-
-| Task | Dataset | Metrics | Pytest threshold |
-|------|---------|---------|------------------|
-| `classify` | `classification.json` | accuracy, micro P/R, macro F1 | `accuracy >= 0.5` |
-| `extract` | `extraction.json` | JSON validity rate, per-field accuracy | `json_valid_rate >= 0.8` |
-| `summarize` | `summarization.json` | ROUGE-1 / ROUGE-2 / ROUGE-L | `ROUGE-1 >= 0.2` |
-| `audio` | `audio.json` (+ `eval/datasets/media/`) | non_empty_rate, keyword_pass_rate (≥ 0.5 overlap) | -- |
-| `video` | `video.json` (+ media) | non_empty_rate, json_valid_rate, expected_keys_rate | -- |
-
-All tasks also report `latency_ms` (`p50/p95/p99/mean`) computed from the
-API's `inference_time_ms`. Reports land in `eval/reports/` as
-`report-<task>-<UTC ts>.json`.
-
-### Dataset shapes
-
-- `classification.json`: `{"text", "labels":[...], "expected":[...],
-  "multi_label": false}`
-- `extraction.json`: `{"text", "schema":{...}, "expected":{...}}`
-- `summarization.json`: `{"text", "reference", "style?",
-  "max_sentences?"}`
-- `audio.json`: `{"file":"media/…", "mode":"listen|transcribe|translate",
-  "expected_keywords?":[...], "target_language?", "source_language?"}`
-- `video.json`: `{"file":"media/…", "task?", "n_frames?",
-  "include_audio?", "expected_keys?":[...]}`
-
-## 15. Performance Tuning
+## 14. Performance Tuning
 
 - **Threads**: `THREADS` to physical core count (4 on Pi 5, 8+ on dev).
 - **Context size**: lower `CONTEXT_SIZE` reduces RAM; raise to `16384`
@@ -585,26 +578,23 @@ API's `inference_time_ms`. Reports land in `eval/reports/` as
   `GPU_LAYERS=99`, `MMPROJ_USE_GPU=true`.
 - **TTS**: trim `TTS_VOICES_ENABLED` to shorten cold start; raise
   `TTS_MAX_CONCURRENCY` only if the host has spare cores.
-- **Video**: stay at `n_frames <= MAX_VIDEO_FRAMES` (6) on Pi 5; each
-  added frame costs ~250-400 ms of vision encode (multiple seconds on
-  CPU-only Pi 5).
 
-## 16. Future Work
+## 15. Future Work
 
 Already shipped (no longer "future"):
 
-- Native audio support for E2B/E4B (`/audio/listen`, `/audio/translate`,
-  `/audio/transcribe`).
-- Video tutor (`/video/analyze-process`, ffmpeg-sampled frames + audio).
-- Vision tutor (`/vision/explain-work`).
-- NDJSON streaming on text + audio + video routes, with `meta` and
-  `heartbeat` framing.
-- Opt-in Piper TTS on every endpoint (inline-base64, file-URL, and
-  per-sentence streaming attach shapes), curated voice registry, and
-  `POST /tts/speak`.
+- Five mode-specific endpoints powering the four Widushi modes —
+  FreeConvo, VoiceMirror (suggest + score), Vision, RolePlay.
+- Native audio support for E2B/E4B on every audio-bearing mode endpoint
+  via llama.cpp's mtmd Gemma 4 audio path.
+- NDJSON streaming with periodic `heartbeat` markers on `/audio/listen`.
+- Opt-in Piper TTS on every mode endpoint (file-URL attach shape on
+  non-streaming responses; per-sentence `{"type":"audio"}` NDJSON on
+  `/audio/listen` streams), curated voice registry.
 
 Designed-for but not yet implemented:
 
-- Embeddings endpoint.
+- Summative scoring at `RolePlayMode` exit.
+- Embeddings endpoint (learner stumble-pattern memory).
 - GPU auto-detection.
 - Model hot-swap without restart.

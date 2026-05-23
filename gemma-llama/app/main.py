@@ -1,4 +1,11 @@
-"""FastAPI application entrypoint."""
+"""FastAPI application entrypoint.
+
+The Widushi api container only exposes the five mode-specific endpoints --
+``/free-convo/turn``, ``/voice-mirror/suggest``, ``/voice-mirror/score``,
+``/vision/teach-object``, ``/audio/listen`` -- plus the operational
+``/health`` / ``/`` (playground) routes and a couple of supporting routes
+for the playground (``/presets``, ``/tts/output/{id}.wav``).
+"""
 from __future__ import annotations
 
 import logging
@@ -13,20 +20,9 @@ from fastapi.templating import Jinja2Templates
 from .config import get_settings
 from .llama_adapter import LlamaAdapter
 from .model_config import load_model_config
-from .routers import (
-    audio,
-    chat,
-    classify,
-    extract,
-    free_convo,
-    generate,
-    summarize,
-    video,
-    vision,
-    voice_mirror,
-)
+from .routers import audio, free_convo, presets, vision, voice_mirror
 from .schemas import HealthResponse
-from .tts import PiperEngine
+from .tts import DEFAULT_PERSONALITY, PERSONALITIES, PiperEngine
 from .tts.router import router as tts_router
 from .tts.storage import TTSStorage
 
@@ -94,11 +90,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="gemma-llama",
-    version="0.1.0",
+    version="0.2.0",
     description=(
-        "Local Gemma 4 inference service backed by llama.cpp. Exposes text, "
-        "vision, audio, and video endpoints designed as a personalized "
-        "educational tutor running on a Raspberry Pi 5."
+        "Local Gemma 4 inference service backed by llama.cpp. Exposes the "
+        "five Widushi mode endpoints (FreeConvo, VoiceMirror suggest/score, "
+        "VisionMode, RolePlay/audio-listen) plus a built-in playground."
     ),
     lifespan=lifespan,
 )
@@ -127,6 +123,23 @@ async def timing_and_logging(request: Request, call_next):
 # --- core endpoints --------------------------------------------------------
 
 
+def _voice_choices() -> list[dict[str, str | bool]]:
+    """Inline the curated Piper personality registry for the playground.
+
+    The playground used to fetch ``GET /tts/voices`` at boot. That endpoint
+    was removed when we trimmed the surface to the five mode endpoints, so
+    instead we hand the (static) registry to the template directly.
+    """
+    return [
+        {
+            "id": key,
+            "label": f"{key} - {voice.description}",
+            "is_default": key == DEFAULT_PERSONALITY,
+        }
+        for key, voice in PERSONALITIES.items()
+    ]
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def playground(request: Request):
     cfg = request.app.state.model_config
@@ -139,6 +152,8 @@ async def playground(request: Request):
             "model_short_name": cfg.short_name,
             "modalities": cfg.modalities.model_dump(),
             "tts_ready": bool(engine and engine.ready),
+            "tts_default_voice": DEFAULT_PERSONALITY,
+            "tts_voices": _voice_choices(),
         },
     )
 
@@ -163,14 +178,9 @@ async def health(request: Request):
 
 # --- routers ---------------------------------------------------------------
 
-app.include_router(generate.router, tags=["inference"])
-app.include_router(chat.router, tags=["inference"])
-app.include_router(classify.router, tags=["tasks"])
-app.include_router(extract.router, tags=["tasks"])
-app.include_router(summarize.router, tags=["tasks"])
-app.include_router(vision.router, tags=["tutor"])
-app.include_router(audio.router, tags=["tutor"])
-app.include_router(video.router, tags=["tutor"])
 app.include_router(free_convo.router, tags=["modes"])
 app.include_router(voice_mirror.router, tags=["modes"])
+app.include_router(vision.router, tags=["modes"])
+app.include_router(audio.router, tags=["modes"])
 app.include_router(tts_router, tags=["tts"])
+app.include_router(presets.router, tags=["playground"])

@@ -27,37 +27,10 @@ class GenerationDefaults(BaseModel):
     thinking: bool = True
 
 
-_DEFAULT_VISION_EXPLAIN = (
-    "You are a patient tutor reviewing a student's handwritten work in the "
-    "attached image. Read every visible step, point out what is correct, "
-    "identify the first mistake (if any) and explain why, and suggest the next "
-    "step the student should try without solving the whole problem for them."
-)
 _DEFAULT_AUDIO_LISTEN = (
     "You are a friendly classroom tutor. The student's spoken question is "
     "attached as audio. Understand it, then answer at a level appropriate for "
     "a curious learner. Keep the answer concise, accurate, and conversational."
-)
-_DEFAULT_AUDIO_TRANSLATE = (
-    "You are a precise translator. The attached audio is spoken "
-    "{% if source_language %}in {{ source_language }}{% else %}in the speaker's "
-    "native language{% endif %}. Transcribe and translate it faithfully into "
-    "{{ target_language }}. Respond ONLY with the translated text - no preamble, "
-    "no quotation marks, no commentary."
-)
-_DEFAULT_AUDIO_TRANSCRIBE = (
-    "You are an automatic speech-recognition engine. Transcribe the attached "
-    "audio verbatim into the SAME language it is spoken in. Preserve filler "
-    "words and proper nouns; do not translate, summarise, or add commentary. "
-    "Respond ONLY with the transcript - no preamble, no quotation marks, no "
-    "speaker labels."
-)
-_DEFAULT_VIDEO_LAB = (
-    "You are a lab assistant tutor watching a short clip provided as evenly "
-    "spaced frames{% if include_audio %} and the original audio track{% endif %}."
-    "{% if task %} The student's stated task: \"{{ task }}\".{% endif %} "
-    "Respond as a JSON object with keys 'summary', 'observations' (list), "
-    "'safety_notes' (list), and 'next_step'."
 )
 _DEFAULT_FREE_CONVO = (
     "You are Widushi, a warm voice tutor talking with a Hindi-speaking learner "
@@ -108,28 +81,38 @@ _DEFAULT_VISION_TEACH = (
     "learner. The learner is holding an object in front of a camera and "
     "speaking their guess for its English name. The image and their spoken "
     "guess are both attached. "
-    "Identify the most likely everyday object in the image. Confirm or "
-    "gently correct the learner's guess, then give ONE short model sentence "
-    "they can repeat, of the form 'Yes, this is X. Say: I VERB X.' (or a "
-    "natural variant). Keep it under 20 words total. "
-    "Respond ONLY with a single JSON object with EXACTLY these keys: "
+    "Identify the most likely everyday object in the image and transcribe "
+    "the learner's spoken guess. Then produce ONE short teaching line "
+    "(under 20 words total): "
+    "  - If the transcript matches the object (allowing for accent or a "
+    "    close synonym like 'cup' vs 'mug'), confirm and reinforce: "
+    "    'Yes, this is X. Say: I VERB X.' "
+    "  - If the transcript names a different object, gently correct: "
+    "    'This is X, not Y. Say: I VERB X.' (use the learner's guess as Y). "
+    "  - If the transcript is missing or unintelligible, name the object "
+    "    anyway: 'This is X. Say: I VERB X.' "
+    "OUTPUT FORMAT (very strict): Reply with NOTHING except a single JSON "
+    "object. Do NOT think out loud. Do NOT emit a `<think>` block. Do NOT "
+    "add any preamble, markdown, or commentary. Your very first character "
+    "must be `{` and your very last character must be `}`. "
+    "The JSON must have EXACTLY these three keys: "
     "{\"object\": string, \"transcript\": string, \"text\": string}. "
-    "'object' is the English noun you identified. "
-    "'transcript' is a best-effort transcript of the learner's guess. "
-    "'text' is the spoken teaching line to play back to the learner. "
-    "No markdown, no preamble."
+    "'object' is the English noun you identified in the image. "
+    "'transcript' is a best-effort transcript of the learner's spoken guess "
+    "(empty string if you could not hear it). "
+    "'text' is the spoken teaching line to play back to the learner."
 )
 
 
 class PromptTemplates(BaseModel):
-    classify: str
-    extract: str
-    summarize: str
-    vision_explain: str = _DEFAULT_VISION_EXPLAIN
+    """Jinja2 templates for the five mode endpoints.
+
+    All five have working defaults so a minimal YAML config (just
+    ``display_name`` / ``short_name`` / ``hf_repo`` / ``hf_file``) loads
+    without specifying any prompts.
+    """
+
     audio_listen: str = _DEFAULT_AUDIO_LISTEN
-    audio_translate: str = _DEFAULT_AUDIO_TRANSLATE
-    audio_transcribe: str = _DEFAULT_AUDIO_TRANSCRIBE
-    video_lab: str = _DEFAULT_VIDEO_LAB
     free_convo: str = _DEFAULT_FREE_CONVO
     voice_mirror_suggest: str = _DEFAULT_VOICE_MIRROR_SUGGEST
     voice_mirror_score: str = _DEFAULT_VOICE_MIRROR_SCORE
@@ -153,7 +136,7 @@ class ModelConfig(BaseModel):
 
     modalities: Modalities = Field(default_factory=Modalities)
     defaults: GenerationDefaults = Field(default_factory=GenerationDefaults)
-    prompts: PromptTemplates
+    prompts: PromptTemplates = Field(default_factory=PromptTemplates)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

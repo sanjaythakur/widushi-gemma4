@@ -2,8 +2,8 @@
 
 Portable, production-ready local LLM inference for the **Gemma 4** family (April 2026 release: E2B, E4B, 26B A4B MoE, and 31B dense GGUFs from Unsloth), packaged as a two-container Docker Compose stack:
 
-- **`llama`** — `llama.cpp`'s `llama-server` with the GGUF model (and vision projector) auto-downloaded from Hugging Face on first boot.
-- **`api`** — FastAPI service exposing OpenAI-style chat completions plus task-specific endpoints (`/generate`, `/chat`, `/classify`, `/extract`, `/summarize`) and a built-in playground UI.
+- **`llama`** — `llama.cpp`'s `llama-server` with the GGUF model (and the unified vision + audio projector) auto-downloaded from Hugging Face on first boot.
+- **`api`** — FastAPI service exposing five mode-specific tutor endpoints — `/free-convo/turn`, `/voice-mirror/suggest`, `/voice-mirror/score`, `/vision/teach-object`, `/audio/listen` — plus a built-in playground UI.
 
 Designed to run unattended 24/7 on a **Raspberry Pi 5 (16 GB, arm64)** while remaining first-class on **Apple Silicon** and **Linux x86_64** dev boxes.
 
@@ -52,108 +52,64 @@ All endpoints live at the root, served on host port `${API_PORT:-8010}` (contain
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET`  | `/` | Interactive playground (HTML). |
-| `GET`  | `/health` | `{"status","model","llama_server_reachable"}`; `503` when `llama` is unreachable. |
-| `POST` | `/generate` | Single-prompt text generation; supports image attachments and SSE-style NDJSON streaming. |
-| `POST` | `/chat` | Multi-turn chat; per-message image attachments. |
-| `POST` | `/classify` | Single- or multi-label classification (uses `response_format=json_object`). |
-| `POST` | `/extract` | Schema-driven structured extraction; tolerant to malformed JSON via `_raw` / `_error`. |
-| `POST` | `/summarize` | Abstractive summarization with optional `style` and `max_sentences`. |
-| `POST` | `/vision/explain-work` | "The Homework Checker" -- multipart image + question, tutor-style feedback. |
-| `POST` | `/audio/listen` | "The Classroom Ear" -- multipart audio question, tutor answer in text. Supports `stream=true`. |
-| `POST` | `/audio/translate` | Multipart audio in language A -> text in language B. |
-| `POST` | `/audio/transcribe` | Multipart audio -> verbatim transcript in the source language. |
-| `POST` | `/video/analyze-process` | "The Lab Assistant" -- multipart short clip; samples N frames + audio via ffmpeg. Supports `stream=true`. |
-| `GET`  | `/tts/voices` | List the curated Piper voice "personalities" (default, language, downloaded?). |
-| `GET`  | `/tts/output/{id}.wav` | Serve a previously-rendered WAV from the TTL cache. |
-| `POST` | `/tts/speak` | One-shot Piper synthesis for arbitrary text. |
+| `GET`  | `/health` | `{"status","model","llama_server_reachable","tts_ready"}`; `503` when `llama` is unreachable. |
+| `POST` | `/free-convo/turn` | **FreeConvoMode.** Multipart audio → warm Hinglish reply + `start_learning` intent flag. |
+| `POST` | `/voice-mirror/suggest` | **VoiceMirrorMode.** JSON `{level?, history?}` → next target word + spoken cue text. |
+| `POST` | `/voice-mirror/score` | **VoiceMirrorMode.** Multipart audio + `target_word` → `praise` / `correct` / `retry` verdict + feedback line. |
+| `POST` | `/vision/teach-object` | **VisionMode.** Multipart `image + audio` (camera frame + spoken guess) → teaching line ("Yes, this is milk. Say: I drink milk."). |
+| `POST` | `/audio/listen` | **RolePlayMode / fallback.** Multipart audio → text answer. Supports `stream=true` NDJSON. |
 
-Every successful response includes `inference_time_ms`; `/generate` and `/chat` additionally surface `tokens_predicted` and full `usage`. Every response carries an `X-Process-Time-Ms` header.
+Every successful response includes `inference_time_ms` and an `X-Process-Time-Ms` header. Every endpoint accepts the optional `tts` / `voice` fields and returns an `audio_url` to the rendered Piper WAV when `tts=true`.
 
 ### Defaults you should know about
 
-- **`thinking` is off by default** on every endpoint that exposes a `thinking` parameter (`/generate`, `/chat`, `/classify`, `/extract`, `/summarize`, `/vision/explain-work`, `/audio/listen`, `/video/analyze-process`). Chain-of-thought roughly doubles the decoded token count on Pi 5 for the same final answer, so we make callers opt in explicitly. Set `"thinking": true` (JSON) or `thinking=true` (form) per request when reasoning helps quality. `/audio/translate` and `/audio/transcribe` always run with `thinking=false` (no parameter — reasoning has no business in transcription).
-- **Image / audio / video downsizing**: uploads to the multimodal routes are normalised in [`app/media_multipart.py`](../app/media_multipart.py) before they reach the projector — images are resized to fit Gemma 4's 896 px tile (longest edge) and re-encoded as JPEG; audio is transcoded to mono 16 kHz WAV; video is sampled to `n_frames=3` evenly-spaced 896-px JPEG frames plus an optional mono 16 kHz audio track in one ffmpeg pass. The video frame cap is `n_frames=6` because each frame costs ~60-80 s through the vision projector on Pi 5 CPU.
+- **`thinking` is off by default** on every endpoint. Chain-of-thought roughly doubles the decoded token count on Pi 5 for the same final answer; the mode endpoints all run with `thinking=false` for snappy turn latency. Only `/audio/listen` exposes a `thinking` form field for harder spoken questions where reasoning helps quality.
+- **Image / audio downsizing**: uploads to the multimodal routes are normalised in [`app/media_multipart.py`](../app/media_multipart.py) before they reach the projector — images are resized to fit Gemma 4's 896 px tile (longest edge) and re-encoded as JPEG; audio is transcoded to mono 16 kHz WAV.
 
 ### Streaming
 
-Set `"stream": true` on `/generate` or `/chat`. The body is `application/x-ndjson`; each line is one of:
+Only `/audio/listen` streams (`stream=true`). The body is `application/x-ndjson`; each line is one of:
 
 ```json
-{"type": "thinking", "content": "..."}
-{"type": "text",     "content": "..."}
-{"type": "audio",    "seq": 1, "sentence": "...", "content": "<base64-wav>", "mime": "audio/wav", "sample_rate": 22050, "voice": "warm-academic"}
-{"type": "error",    "content": "..."}
+{"type": "text",      "content": "..."}
+{"type": "heartbeat", "elapsed_ms": 5000}
+{"type": "audio",     "seq": 1, "sentence": "...", "content": "<base64-wav>", "mime": "audio/wav", "sample_rate": 22050, "voice": "warm-academic"}
+{"type": "error",     "content": "..."}
 ```
 
-`audio` lines are emitted only when `tts: true` is set on the request -- one
-per completed sentence -- so audio plays back while Gemma is still
-generating the next sentence. See [Text-to-Speech (Piper)](endpoints.md#text-to-speech-piper)
-for the full opt-in surface.
-
-### Thinking toggle
-
-`thinking: false` (default) suppresses chain-of-thought. The adapter (a) sends `chat_template_kwargs.enable_thinking=false` to llama.cpp so chat templates that honour it (Qwen3, newer Gemma builds) skip emitting `<think>` blocks, (b) appends `/no_think` to the last user message as a Qwen3-style fallback, and (c) filters any `reasoning_content` deltas or stray `<think>...</think>` spans so neither the streaming NDJSON nor the response `text` ever contains reasoning. Setting `thinking: true` re-enables reasoning and exposes it via the streaming `[think] ...` events / `thinking_content` response field.
-
-### Image attachments
-
-Both `/generate` (top-level `images`) and `/chat` (per-message `images`) accept an array of `ImageInput`s; each is either:
-
-```json
-{"url": "https://example.com/cat.jpg"}
-{"url": "data:image/png;base64,iVBORw0K..."}
-{"base64": "iVBORw0K...", "mime_type": "image/png"}
-```
-
-Images are forwarded to `llama-server` as OpenAI-style `image_url` content parts and routed through the configured `mmproj` projector.
+`heartbeat` lines fire every 5 s so the HTTP connection survives multi-minute audio prefill on Pi 5. `audio` lines are emitted only when `tts=true` — one per completed sentence — so audio plays back while Gemma is still generating the next sentence. See [TTS audio attach](endpoints.md#tts-audio-attach) for the full opt-in surface.
 
 ### Example calls
 
 ```bash
-curl -s localhost:8010/generate \
+# FreeConvoMode: post-wake spoken turn -> reply + start_learning flag
+curl -s -X POST localhost:8010/free-convo/turn \
+  -F "audio=@hello.wav" -F "tts=true" | jq
+```
+
+```bash
+# VoiceMirrorMode: ask for the next word to practise
+curl -s localhost:8010/voice-mirror/suggest \
   -H 'content-type: application/json' \
-  -d '{"prompt":"In one sentence, what is an SLM?","thinking":false}' | jq
+  -d '{"level":"beginner","history":["apple","water"],"tts":true}' | jq
 ```
 
 ```bash
-curl -s localhost:8010/classify \
-  -H 'content-type: application/json' \
-  -d '{"text":"Battery dies fast.","labels":["positive","negative","neutral"]}' | jq
+# VoiceMirrorMode: score the learner's attempt at "river"
+curl -s -X POST localhost:8010/voice-mirror/score \
+  -F "audio=@attempt.wav" -F "target_word=river" -F "tts=true" | jq
 ```
 
 ```bash
-curl -s localhost:8010/extract \
-  -H 'content-type: application/json' \
-  -d '{"text":"Anjali, party of 4, 7:30 PM Friday at Ocean Grill.",
-       "schema":{"name":"string","party_size":"integer","time":"string","day":"string","venue":"string"}}' | jq
+# VisionMode: camera frame + spoken guess -> teaching line
+curl -s -X POST localhost:8010/vision/teach-object \
+  -F "image=@frame.jpg" -F "audio=@guess.wav" -F "tts=true" | jq
 ```
 
 ```bash
-# vision: notebook -> tutor feedback
-curl -s -X POST localhost:8010/vision/explain-work \
-  -F "image=@notebook.jpg" -F "subject=algebra" \
-  -F "question=Where did I go wrong on step 3?" | jq
-```
-
-```bash
-# audio: spoken question -> answer (NDJSON streamed)
+# RolePlayMode: in-character NPC turn (NDJSON streamed)
 curl -s -N -X POST localhost:8010/audio/listen \
-  -F "audio=@question.m4a" -F "stream=true"
-
-# audio: verbatim transcription
-curl -s -X POST localhost:8010/audio/transcribe \
-  -F "audio=@question.m4a" | jq
-
-# audio: French clip -> English text
-curl -s -X POST localhost:8010/audio/translate \
-  -F "audio=@bonjour.m4a" -F "target_language=English" -F "source_language=French" | jq
-```
-
-```bash
-# video: short experiment clip -> JSON tutor response
-curl -s -X POST localhost:8010/video/analyze-process \
-  -F "video=@titration.mp4" \
-  -F "task=titrate NaOH into HCl until colour change" \
-  -F "n_frames=4" | jq
+  -F "audio=@learner-turn.wav" -F "stream=true" -F "tts=true"
 ```
 
 ---
@@ -193,10 +149,10 @@ All settings come from environment variables (typically via `.env`). See [`.env.
 ### Switching model
 
 1. Pick a config from `model_configs/` (HF filenames are case-sensitive — keep the uppercase `E4B`/`E2B`/`A4B`/`B`):
-   - `gemma4-e4b.yaml` -- **Gemma 4 E4B** (4B effective). Default. Fits Pi 5 16 GB. Text + image + audio + video.
-   - `gemma4-e2b.yaml` -- **Gemma 4 E2B** (2B effective). Lighter Pi-friendly sibling. Text + image + audio + video.
-   - `gemma4-26b-a4b.yaml` -- **Gemma 4 26B A4B** (MoE; ~3.8B active). Needs ~16 GB RAM. Text + image only.
-   - `gemma4-31b.yaml` -- **Gemma 4 31B** (dense). Needs ~20 GB RAM or GPU offload. Text + image only.
+   - `gemma4-e4b.yaml` -- **Gemma 4 E4B** (4B effective). Default. Fits Pi 5 16 GB. Image + audio (powers all five mode endpoints).
+   - `gemma4-e2b.yaml` -- **Gemma 4 E2B** (2B effective). Lighter Pi-friendly sibling. Image + audio.
+   - `gemma4-26b-a4b.yaml` -- **Gemma 4 26B A4B** (MoE; ~3.8B active). Needs ~16 GB RAM. Image only — `/audio/listen`, `/free-convo/turn`, `/voice-mirror/score`, and `/vision/teach-object` return `409` on this config.
+   - `gemma4-31b.yaml` -- **Gemma 4 31B** (dense). Needs ~20 GB RAM or GPU offload. Image only (same `409` caveat).
 2. Update `.env`:
    ```env
    MODEL_CONFIG_PATH=model_configs/gemma4-e4b.yaml
@@ -208,35 +164,6 @@ All settings come from environment variables (typically via `.env`). See [`.env.
 3. `docker compose up -d --build` (the new GGUF downloads to `./models` once and is reused thereafter).
 
 If a default repo becomes unavailable, override `MODEL_REPO`/`MODEL_FILE` to point at any community mirror that exposes the same `.gguf` (e.g. a `bartowski/...` or `ggml-org/...` quantization).
-
----
-
-## Evaluation harness
-
-A small offline harness lives in `eval/` and exercises the running API.
-
-```bash
-pip install -r requirements-eval.txt
-
-# CLI runner -- writes timestamped JSON into eval/reports/
-python -m eval.runner --all
-python -m eval.runner --task classify
-python -m eval.runner --task extract
-python -m eval.runner --task summarize
-
-# Pytest -- skipped automatically if the API is not reachable
-pytest eval/ -v -s
-```
-
-Datasets live in `eval/datasets/`; thresholds enforced by the pytest tests:
-
-| Task | Pass threshold |
-|------|----------------|
-| Classification | `accuracy >= 0.5` |
-| Extraction | `json_valid_rate >= 0.8` |
-| Summarization | `ROUGE-1 >= 0.2` |
-
-All tasks also report latency `p50/p95/p99/mean` from the API's `inference_time_ms` field.
 
 ---
 
@@ -287,7 +214,6 @@ These knobs live outside the container but materially affect inference speed:
 │   ├── media.py                  # URL / base64 image normalization
 │   ├── schemas.py                # Pydantic request/response models
 │   └── templates/playground.html # GET /
-├── eval/                         # offline evaluation harness
 ├── models/                       # mounted volume (gitignored)
 └── specification.md              # source-of-truth spec
 ```
@@ -296,36 +222,32 @@ These knobs live outside the container but materially affect inference speed:
 
 ## Notes & caveats
 
-- **Audio + Video are live on E2B/E4B.** The April 2026 llama.cpp release bundles the native Gemma 4 audio path; the unified mmproj projector that ships in the same Unsloth GGUF repo (default: `mmproj-F16.gguf`; `mmproj-BF16.gguf` and `mmproj-F32.gguf` also available) carries both vision and audio adapters, so a single `--mmproj` flag enables `/vision/*`, `/audio/*`, and `/video/*` end-to-end. The 26B-A4B and 31B model configs intentionally keep `audio: false` / `video: false` because Google did not release native audio adapters for those sizes.
+- **Audio is live on E2B/E4B.** The April 2026 llama.cpp release bundles the native Gemma 4 audio path; the unified mmproj projector that ships in the same Unsloth GGUF repo (default: `mmproj-F16.gguf`; `mmproj-BF16.gguf` and `mmproj-F32.gguf` also available) carries both vision and audio adapters, so a single `--mmproj` flag powers `/free-convo/turn`, `/voice-mirror/score`, `/vision/teach-object`, and `/audio/listen` end-to-end. The 26B-A4B and 31B model configs intentionally keep `audio: false` because Google did not release native audio adapters for those sizes.
 - **Audio context budget.** Audio tokens are denser than text. `CONTEXT_SIZE=8192` (default) handles ~30 s clips comfortably; bump to `16384` for longer recordings if Pi RAM allows.
-- **Video has no native llama.cpp path yet.** `/video/analyze-process` sidesteps that by sampling N evenly spaced frames + the audio track in one ffmpeg pass and feeding both to Gemma 4 in a single multimodal turn.
 - **Model availability:** the `unsloth/gemma-4-*` GGUF mirrors are the default; other community mirrors (e.g. `bartowski/...`, `ggml-org/...`) are equally usable via `MODEL_REPO`/`MODEL_FILE`.
-- **Pi performance:** expect ~3-6 tokens/sec on Pi 5 with E2B Q4_0 for text (E4B Q4_0 is ~1.8-3 t/s); ~4-8 s for a 5-10 s spoken question via `/audio/listen`; ~12-25 s for a 6-frame `/video/analyze-process` clip with audio. With flash attention + q8_0 KV cache + F16 mmproj + Q4_0 weights enabled (see `.env.example`), end-to-end latency is roughly 30-50% lower than the original BF16 / Q4_K_M defaults.
-- **Future work:** see `specification.md` section 16 (embeddings, GPU auto-detection, model hot-swap).
+- **Pi performance:** ~4–8 s for a 5–10 s spoken question via `/audio/listen`; ~6–10 s for `/vision/teach-object` (single 896 px frame + spoken guess). With flash attention + q8_0 KV cache + F16 mmproj + Q4_0 weights enabled (see `.env.example`), end-to-end latency is roughly 30–50% lower than the original BF16 / Q4_K_M defaults.
+- **Future work:** see `specification.md` section 15 (RolePlay summative scoring, embeddings-driven stumble memory, GPU auto-detection, model hot-swap).
 
 ---
 
 ## Text-to-Speech (Piper)
 
-Every endpoint above accepts two optional fields -- `tts: true` and a curated
-`voice` id (default `warm-academic`) -- to opt into Piper TTS audio output:
+Every mode endpoint above accepts two optional fields -- `tts: true` and a curated
+`voice` id (default `warm-academic`) -- to opt into Piper TTS audio output.
 
-- **Streaming endpoints** (`/generate`, `/chat`, `/audio/listen`,
-  `/video/analyze-process` with `stream=true`) interleave new
+- **Non-streaming responses** (`/free-convo/turn`, `/voice-mirror/suggest`,
+  `/voice-mirror/score`, `/vision/teach-object`, and `/audio/listen`
+  without `stream=true`) return an `audio_url` field on the JSON response
+  pointing at a cached WAV. The device fetches that URL and plays it back;
+  files are evicted after `TTS_OUTPUT_TTL_SECONDS` (default `600`).
+- **`/audio/listen` with `stream=true`** interleaves
   `{"type":"audio", ...}` NDJSON lines (base64 WAV per completed sentence)
   alongside the existing `{"type":"text"}` chunks. Audio playback can start
   as soon as the first sentence ends, in parallel with token generation.
-- **Short non-streaming endpoints** (`/classify`, `/audio/translate`)
-  inline the audio as `audio_base64` in the JSON response.
-- **Long non-streaming endpoints** (`/generate`, `/chat`, `/summarize`,
-  `/extract`, `/vision/explain-work`, `/audio/listen`, `/audio/transcribe`,
-  `/video/analyze-process`) return an `audio_url` pointing at
-  `GET /tts/output/{id}.wav`; files are evicted after
-  `TTS_OUTPUT_TTL_SECONDS`.
 
 The TTS subsystem ships with five curated voice personalities
 (`warm-academic`, `friendly-casual`, `neutral-news`, `energetic-kid`,
-`calm-storyteller`); list / inspect them via `GET /tts/voices`. Trim
+`calm-storyteller`) registered in `app/tts/voices.py`. Trim
 `TTS_VOICES_ENABLED` to shorten api container cold-start.
 
 The api container installs the prebuilt `piper_linux_aarch64` binary from

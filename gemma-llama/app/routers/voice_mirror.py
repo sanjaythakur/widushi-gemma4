@@ -54,6 +54,13 @@ def _parse_suggest(raw: str) -> dict[str, str]:
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
+        # Surface what the model actually returned so the operator can see
+        # whether it was truncated, prefixed with prose, or wrapped in a
+        # leftover ``<think>`` block.
+        logger.warning(
+            "voice-mirror/suggest: JSON parse failed; raw=%r",
+            raw[:400],
+        )
         # Fallback: treat the entire text as the cue and synthesise the word.
         word = (cleaned.split()[:1] or ["apple"])[0].strip(".,!?\"'").lower() or "apple"
         return {
@@ -91,6 +98,14 @@ def _parse_score(raw: str, target_word: str) -> dict[str, object]:
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
+        # Most common cause on Pi 5 is hitting max_tokens mid-output (the
+        # model emits a long ``<think>`` block, our stripper drops it, and
+        # the JSON never started). Log the raw response so the operator
+        # can tell truncation from genuine model confusion.
+        logger.warning(
+            "voice-mirror/score: JSON parse failed for target=%r; raw=%r",
+            target_word, raw[:400],
+        )
         return {
             "transcript": None,
             "verdict": "retry",
@@ -143,7 +158,11 @@ async def suggest(
     try:
         response = await adapter.chat_completion(
             [{"role": "user", "content": prompt}],
-            max_tokens=256,
+            # 512 leaves headroom for any ``<think>`` preamble Gemma 4
+            # emits despite ``enable_thinking: false`` -- 256 was tight
+            # enough that the JSON envelope was truncated and we silently
+            # fell back to the canned cue.
+            max_tokens=512,
             temperature=0.7,
             response_format={"type": "json_object"},
             thinking=False,
@@ -179,10 +198,14 @@ async def suggest(
 async def score(
     audio: UploadFile = File(..., description="Recording of the learner's attempt."),
     target_word: str = Form(..., description="The word the learner was asked to say."),
+    # 512 default leaves headroom for the ``<think>`` preamble that Gemma
+    # 4's chat template emits despite ``enable_thinking: false`` -- 256
+    # truncated the JSON envelope and forced the "couldn't quite hear"
+    # fallback for every preset.
     max_tokens: int | None = Form(None, ge=1, le=2048),
     temperature: float | None = Form(None, ge=0.0, le=2.0),
     tts: bool = Form(False, description="If true, also render the feedback via Piper TTS."),
-    voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see GET /tts/voices)."),
+    voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see app/tts/voices.py)."),
     adapter: LlamaAdapter = Depends(get_adapter),
     cfg: ModelConfig = Depends(get_model_config),
     tts_engine: PiperEngine | None = Depends(get_tts_engine),
@@ -218,7 +241,7 @@ async def score(
     try:
         response = await adapter.chat_completion(
             messages,
-            max_tokens=max_tokens or 256,
+            max_tokens=max_tokens or 512,
             temperature=temperature if temperature is not None else 0.2,
             response_format={"type": "json_object"},
             thinking=False,

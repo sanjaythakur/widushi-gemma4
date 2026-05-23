@@ -1,16 +1,14 @@
 """Glue the TTS engine + storage onto FastAPI's response shapes.
 
-Three public helpers, each consumed by exactly one shape of router code:
+Two public helpers, each consumed by exactly one shape of router code:
 
-* :func:`attach_inline_tts` -- short-form endpoints (``/classify``,
-  ``/audio/translate``). Returns a dict containing ``audio_base64`` ready
-  to merge into the JSON response.
-* :func:`attach_file_tts` -- long-form endpoints (everything else). Writes
-  a WAV to the cache and returns a dict containing the public ``audio_url``.
-* :func:`wrap_stream_with_tts` -- streaming endpoints (``/generate``,
-  ``/chat``, ``/audio/listen``, ``/video/analyze-process``). Wraps the
-  upstream NDJSON iterator and interleaves ``{"type":"audio", ...}``
-  lines per completed sentence.
+* :func:`attach_file_tts` -- non-streaming mode endpoints (every one of the
+  five Widushi routes that returns JSON). Writes a WAV to the cache and
+  returns a dict containing the public ``audio_url``.
+* :func:`wrap_stream_with_tts` -- the lone streaming endpoint
+  (``/audio/listen`` with ``stream=true``). Wraps the upstream NDJSON
+  iterator and interleaves ``{"type":"audio", ...}`` lines per completed
+  sentence.
 """
 from __future__ import annotations
 
@@ -68,43 +66,7 @@ async def _synth_all(
 
 
 # ---------------------------------------------------------------------------
-# inline (base64) attach -- short outputs
-# ---------------------------------------------------------------------------
-
-
-async def attach_inline_tts(
-    text: str,
-    *,
-    engine: PiperEngine,
-    voice: str | None,
-) -> dict[str, object]:
-    """Render ``text`` and return the inline-base64 attachment dict.
-
-    Resulting keys (always present so clients can rely on them):
-
-    ``audio_base64``: ``str | None`` -- ``data``-stripped raw base64 WAV.
-    ``audio_mime``: ``"audio/wav"``.
-    ``voice``: resolved personality id.
-    ``audio_error``: only set when synth failed; explains why.
-    """
-    key, _ = resolve_personality(voice)
-    base = {"audio_base64": None, "audio_mime": "audio/wav", "voice": key}
-    try:
-        blobs, _ = await _synth_all(text, engine=engine, voice=key)
-        wav = concat_wavs(blobs)
-        if not wav:
-            return {**base, "audio_error": "TTS produced no audio"}
-        return {
-            **base,
-            "audio_base64": base64.b64encode(wav).decode("ascii"),
-            "audio_duration_ms": wav_duration_ms(wav),
-        }
-    except PiperError as exc:
-        return {**base, "audio_error": str(exc)}
-
-
-# ---------------------------------------------------------------------------
-# file (URL) attach -- long outputs
+# file (URL) attach -- every non-streaming mode endpoint
 # ---------------------------------------------------------------------------
 
 

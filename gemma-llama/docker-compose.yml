@@ -121,6 +121,11 @@ services:
       # tmpfs) so the TTL janitor can outlive a container restart cleanly
       # while still being trivially throwable.
       - ./tts_outputs:/tmp/tts_outputs
+      # Playground preset bundle. Holds `manifest.json` + small WAV/JPG
+      # assets the playground UI offers as one-click preset inputs for the
+      # five mode endpoints. Read-only inside the container; edit on the
+      # host and refresh the playground to pick up changes.
+      - ./api-presets:/api/presets:ro
     environment:
       LLAMA_SERVER_URL: ${LLAMA_SERVER_URL:-http://llama:8080}
       MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-model_configs/gemma4-e4b.yaml}
@@ -147,5 +152,9 @@ services:
       TTS_VOICES_ENABLED: ${TTS_VOICES_ENABLED:-warm-academic,friendly-casual,neutral-news,energetic-kid,calm-storyteller}
       TTS_MAX_SENTENCE_CHARS: ${TTS_MAX_SENTENCE_CHARS:-400}
       TTS_MAX_CONCURRENCY: ${TTS_MAX_CONCURRENCY:-2}
+      # Where the api looks for the playground preset bundle (matches the
+      # volume mount above). Override only if you bind-mount a different
+      # path in.
+      API_PRESETS_DIR: ${API_PRESETS_DIR:-/api/presets}
       # Required by docker/download_voices.sh to fetch from gated repos.
       HF_TOKEN: ${HF_TOKEN:-}
