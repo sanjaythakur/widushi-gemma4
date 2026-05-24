@@ -126,6 +126,17 @@ services:
       # five mode endpoints. Read-only inside the container; edit on the
       # host and refresh the playground to pick up changes.
       - ./api-presets:/api/presets:ro
+      # Learner profiles (Phase 1A). One Markdown file per learner, with
+      # a YAML front-matter header. Read-only in Phase 1A; flips to :rw
+      # in Phase 3 when the onboarding flow starts writing new profiles.
+      - ./learner_profiles:/learner_profiles:ro
+      # SQLite-backed session / episode / turn store (Phase 1B). Bind-
+      # mounted (not a named volume) so the WAL/SHM files are inspectable
+      # on the host; `widushi.db` survives container restarts. The api
+      # process is the sole writer; PRD §8 assumes one Pi 5 / one
+      # learner / one session at a time, so there is no need for
+      # row-level locking.
+      - ./data:/data
     environment:
       LLAMA_SERVER_URL: ${LLAMA_SERVER_URL:-http://llama:8080}
       MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-model_configs/gemma4-e4b.yaml}
@@ -156,5 +167,15 @@ services:
       # volume mount above). Override only if you bind-mount a different
       # path in.
       API_PRESETS_DIR: ${API_PRESETS_DIR:-/api/presets}
+      # Where the api looks for learner-profile Markdown files (Phase 1A).
+      # Matches the `./learner_profiles:/learner_profiles:ro` mount above.
+      LEARNER_PROFILES_DIR: ${LEARNER_PROFILES_DIR:-/learner_profiles}
+      # Memory / context engine persistence (Phase 1B). DATA_DIR is the
+      # bind mount root; SQLITE_PATH points at the on-disk DB file.
+      # SESSION_IDLE_TIMEOUT_SECONDS controls when an inactive open
+      # session is auto-closed and a fresh one opened on the next call.
+      DATA_DIR: ${DATA_DIR:-/data}
+      SQLITE_PATH: ${SQLITE_PATH:-/data/widushi.db}
+      SESSION_IDLE_TIMEOUT_SECONDS: ${SESSION_IDLE_TIMEOUT_SECONDS:-1800}
       # Required by docker/download_voices.sh to fetch from gated repos.
       HF_TOKEN: ${HF_TOKEN:-}

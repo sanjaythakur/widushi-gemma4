@@ -120,6 +120,18 @@ PRESETS: list[tuple[str, str, str | None]] = [
     ("audio-listen/hinglish-question.wav",
      "ये इंग्लिश में क्या है?",
      None),
+
+    # ---------------------------------------------------------------------
+    # Memory PRD presets (see ../gemma-llama/specs/memory.md). Only one
+    # entry today: Phase 5's "stumble note" seed -- Kalzy mispronouncing
+    # "Thursday" so the semantic-memory pipeline has something to write
+    # into `skill_note`. Identical mumbled-voice description as the
+    # existing river-mumbled preset so the VoiceMirror score endpoint
+    # reliably flags it as `retry`.
+    # ---------------------------------------------------------------------
+    ("voice-mirror-score/thursday-mumbled.wav",
+     "Thursday.",
+     MUMBLED_DESCRIPTION),
 ]
 
 TARGET_SR = 22050

@@ -53,6 +53,9 @@ coverage.xml
 gemma-llama/models/
 gemma-llama/voices/
 gemma-llama/tts_outputs/
+# SQLite-backed session/episode/turn store (Phase 1B). Bind-mounted into the
+# api container; recreated automatically on first request when missing.
+gemma-llama/data/
 
 # pre-generated-clips caches model blobs under models/ but keeps *.onnx.json etc.
 pre-generated-clips/models/.hf-cache/
@@ -80,3 +83,4 @@ docker-compose.override.yml
 *~
 
 spec-new.md
+gemma-llama/specs/

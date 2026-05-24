@@ -13,17 +13,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from ..deps import get_adapter, get_model_config, get_tts_engine, get_tts_storage
+from ..deps import (
+    get_adapter,
+    get_context_engine,
+    get_episode_summariser,
+    get_model_config,
+    get_session_manager,
+    get_tts_engine,
+    get_tts_storage,
+)
 from ..errors import LlamaServerError
 from ..llama_adapter import LlamaAdapter, extract_content, extract_usage
 from ..media import build_user_content
 from ..media_multipart import read_audio_upload
+from ..memory import (
+    ContextEngine,
+    Episode,
+    EpisodeSummariser,
+    Session,
+    SessionManager,
+)
 from ..model_config import ModelConfig
 from ..prompts import render_audio_listen_prompt
 from ..schemas import AudioListenResponse
@@ -33,6 +49,8 @@ from ..tts.storage import TTSStorage
 from ..tts.voices import DEFAULT_PERSONALITY
 
 router = APIRouter()
+
+_MODE = "audio"
 
 
 def _require_audio(cfg: ModelConfig) -> None:
@@ -48,6 +66,69 @@ def _require_audio(cfg: ModelConfig) -> None:
 
 
 _HEARTBEAT_INTERVAL_S = 5.0
+
+
+def _record_assistant_after_stream(
+    body: AsyncIterator[str],
+    *,
+    session_manager: SessionManager,
+    episode_summariser: EpisodeSummariser,
+    session: Session,
+    episode: Episode,
+    episode_hint: str | None,
+) -> AsyncIterator[str]:
+    """Tee an NDJSON stream so the final assistant text gets persisted.
+
+    Streaming responses don't carry a structured usage dict (llama.cpp
+    emits per-token deltas), so we buffer ``{"type":"text","content":...}``
+    lines into a single concatenated assistant text and record one turn
+    row after the stream terminates. The TTS wrapper, when present,
+    re-injects ``{"type":"audio",...}`` lines that we ignore for
+    persistence purposes -- the text frames still pass through it
+    unchanged.
+
+    Phase 2: when the request carried ``X-Episode-Hint: close``, we also
+    run the summariser *after* recording the assistant turn. The result
+    is **not** echoed on the wire (we already chose the silent close
+    behaviour for streaming responses) -- it lands on
+    ``episode.summary`` and surfaces via ``GET /sessions/{id}``.
+    """
+
+    async def gen() -> AsyncIterator[str]:
+        chunks: list[str] = []
+        try:
+            async for line in body:
+                stripped = line.strip()
+                if stripped:
+                    try:
+                        obj = json.loads(stripped)
+                        if isinstance(obj, dict) and obj.get("type") == "text":
+                            chunks.append(str(obj.get("content") or ""))
+                    except json.JSONDecodeError:
+                        pass
+                yield line
+        finally:
+            text = "".join(chunks).strip()
+            if text:
+                try:
+                    await session_manager.record_turn(
+                        episode.id, role="assistant", text=text
+                    )
+                except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).exception(
+                        "audio/listen: failed to persist streamed assistant turn"
+                    )
+            if episode_hint is not None:
+                try:
+                    await episode_summariser.maybe_close_episode(
+                        session, episode, hint=episode_hint
+                    )
+                except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).exception(
+                        "audio/listen: streaming episode close summariser failed"
+                    )
+
+    return gen()
 
 
 def _heartbeat_stream(
@@ -133,8 +214,32 @@ async def listen(
     stream: bool = Form(False, description="Stream NDJSON tokens instead of waiting for the full response."),
     tts: bool = Form(False, description="If true, also render the answer via Piper TTS."),
     voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id."),
+    x_learner_id: str | None = Header(
+        default=None,
+        alias="X-Learner-Id",
+        description="Learner profile id; defaults to 'kalzy' (Phase 1A).",
+    ),
+    x_session_id: int | None = Header(
+        default=None,
+        alias="X-Session-Id",
+        description="Session row id to resume; server-generated when absent (Phase 1B).",
+    ),
+    x_episode_hint: str | None = Header(
+        default=None,
+        alias="X-Episode-Hint",
+        description=(
+            "Runtime-orchestrator lifecycle hint. ``close`` closes the "
+            "active episode after this turn is recorded and runs the "
+            "Phase 2 summariser. On streaming responses the summary is "
+            "applied silently (no NDJSON event); inspect via "
+            "``GET /sessions/{id}``."
+        ),
+    ),
     adapter: LlamaAdapter = Depends(get_adapter),
     cfg: ModelConfig = Depends(get_model_config),
+    context_engine: ContextEngine = Depends(get_context_engine),
+    session_manager: SessionManager = Depends(get_session_manager),
+    episode_summariser: EpisodeSummariser = Depends(get_episode_summariser),
     tts_engine: PiperEngine | None = Depends(get_tts_engine),
     tts_storage: TTSStorage | None = Depends(get_tts_storage),
 ):
@@ -142,13 +247,24 @@ async def listen(
 
     audio_url = await read_audio_upload(audio)
 
-    system_prompt = render_audio_listen_prompt(cfg)
+    resolved_learner_id, learner_block = context_engine.build_learner_block(x_learner_id)
+    session = await session_manager.open_or_resume_session(
+        resolved_learner_id, x_session_id
+    )
+    episode = await session_manager.open_or_resume_episode(session.id, _MODE)
+    user_prelude = await context_engine.build_user_prelude(session.id, episode.id)
+
+    system_prompt = render_audio_listen_prompt(cfg, learner_block=learner_block)
+    base_instruction = "Listen to my question and answer it."
+    user_text = (
+        f"{user_prelude}\n\n{base_instruction}" if user_prelude else base_instruction
+    )
     messages = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": build_user_content(
-                "Listen to my question and answer it.",
+                user_text,
                 audio_urls=[audio_url],
             ),
         },
@@ -157,6 +273,12 @@ async def listen(
     resolved_max_tokens = max_tokens or cfg.defaults.max_tokens
     resolved_temperature = (
         temperature if temperature is not None else cfg.defaults.temperature
+    )
+
+    # Record the user turn up-front: even when the stream half-fails we
+    # still want the "learner asked something" event in the timeline.
+    await session_manager.record_turn(
+        episode.id, role="user", text=None, media_kind="audio"
     )
 
     if stream:
@@ -173,7 +295,28 @@ async def listen(
             voice=voice,
             engine=tts_engine,
         )
-        return StreamingResponse(body, media_type="application/x-ndjson")
+        # Wrap the (possibly TTS-wrapped) stream so we can buffer the
+        # assistant text and persist a turn row once the upstream
+        # completes. Streaming responses don't carry our usage dict, so
+        # the turn is logged with `inference_ms=None, usage=None`. When
+        # ``X-Episode-Hint=close`` is set we *also* run the Phase 2
+        # summariser silently inside the same finally block.
+        body = _record_assistant_after_stream(
+            body,
+            session_manager=session_manager,
+            episode_summariser=episode_summariser,
+            session=session,
+            episode=episode,
+            episode_hint=x_episode_hint,
+        )
+        return StreamingResponse(
+            body,
+            media_type="application/x-ndjson",
+            headers={
+                "X-Session-Id": str(session.id),
+                "X-Episode-Id": str(episode.id),
+            },
+        )
 
     try:
         response = await adapter.chat_completion(
@@ -188,6 +331,22 @@ async def listen(
     text = extract_content(response).strip()
     if not text:
         text = "I could not hear that clearly. Could you please ask your question again?"
+    inference_ms = int(response.get("_inference_time_ms", 0.0))
+    usage = extract_usage(response)
+
+    await session_manager.record_turn(
+        episode.id,
+        role="assistant",
+        text=text,
+        inference_ms=inference_ms,
+        usage=usage,
+    )
+
+    # Phase 2: honour X-Episode-Hint=close after the turn is persisted.
+    episode_summary = await episode_summariser.maybe_close_episode(
+        session, episode, hint=x_episode_hint
+    )
+
     tts_attach = await maybe_attach_file(
         text,
         enabled=tts,
@@ -197,8 +356,12 @@ async def listen(
     )
     return AudioListenResponse(
         text=text,
+        learner_id=resolved_learner_id,
+        session_id=session.id,
+        episode_id=episode.id,
+        episode_summary=episode_summary,
         model=cfg.short_name,
         inference_time_ms=response.get("_inference_time_ms", 0.0),
-        usage=extract_usage(response),
+        usage=usage,
         **tts_attach,
     )

@@ -44,6 +44,107 @@ class Settings(BaseSettings):
     log_level: str = Field(default="info", description="Python logging level.")
 
     # ------------------------------------------------------------------
+    # Memory & context engine (Phase 1A: file-backed learner profiles)
+    # ------------------------------------------------------------------
+
+    learner_profiles_dir: str = Field(
+        default="/learner_profiles",
+        description=(
+            "Directory holding `<learner_id>.md` profile files. Bind-mounted "
+            "from `./learner_profiles` into the api container; read-only in "
+            "Phase 1A, flips to read-write in Phase 3 (onboarding)."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # Memory & context engine (Phase 1B: SQLite-backed session/episode/turn)
+    # ------------------------------------------------------------------
+
+    data_dir: str = Field(
+        default="/data",
+        description=(
+            "Directory that holds the SQLite database (and any future "
+            "persistent state). Bind-mounted from `./data` into the api "
+            "container so the DB survives restarts."
+        ),
+    )
+    sqlite_path: str = Field(
+        default="/data/widushi.db",
+        description=(
+            "Path to the SQLite database file (WAL mode, owned by the api "
+            "container). Lives under `data_dir` by default."
+        ),
+    )
+    session_idle_timeout_seconds: int = Field(
+        default=1800,
+        ge=60,
+        description=(
+            "If the most recent open session for a learner had its last "
+            "turn (or, if no turns yet, was opened) more than N seconds "
+            "ago, it is auto-closed and a fresh session is opened on the "
+            "next request. Default 30 min."
+        ),
+    )
+    working_block_k_turns: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Number of most-recent turns from the current episode to "
+            "include in the working block (T0). PRD §3.3 starting point."
+        ),
+    )
+    episodic_block_max_episodes: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Max prior episodes from the same session to include in the "
+            "episodic block (T1, raw-turn dump until Phase 2 adds LLM "
+            "summarisation)."
+        ),
+    )
+    episodic_block_turns_per_episode: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Per-prior-episode turn tail length included in the episodic "
+            "block. Kept small so we never burn the budget on transcripts."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # Memory & context engine (Phase 2: episode lifecycle + LLM summariser)
+    # ------------------------------------------------------------------
+
+    episode_summary_max_tokens: int = Field(
+        default=128,
+        ge=16,
+        le=512,
+        description=(
+            "Token cap for the per-episode summary Gemma call (PRD Phase 2). "
+            "128 is plenty for a ~2-sentence wrap-up; bumping it past 256 "
+            "starts eating the episodic-block budget in §3.3."
+        ),
+    )
+    episode_summary_temperature: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "Sampling temperature for the episode + rolling-summary calls. "
+            "Kept low so summaries stay deterministic across re-runs."
+        ),
+    )
+    rolling_summary_every_n_closes: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Re-summarise session.rolling_summary after every Nth episode "
+            "close (PRD Phase 2). Counter is persisted under "
+            "session.meta_json so the cadence survives restarts."
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # TTS (Piper)
     # ------------------------------------------------------------------
 

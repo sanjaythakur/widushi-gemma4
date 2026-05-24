@@ -55,6 +55,37 @@ class AudioListenResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     text: str = Field(..., description="Tutor's spoken-question answer in text.")
+    learner_id: str | None = Field(
+        default=None,
+        description=(
+            "Resolved learner id used to build the system prompt (post-fallback "
+            "to the default profile). Phase 1A introduces this field."
+        ),
+    )
+    session_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite session row id this turn was recorded under. Echoed back "
+            "so the client (or playground) can stamp it onto subsequent "
+            "requests via the ``X-Session-Id`` header. Phase 1B."
+        ),
+    )
+    episode_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite episode row id this turn was recorded under (one episode "
+            "per ``(session, mode)`` until Phase 2 introduces explicit "
+            "close hints). Phase 1B."
+        ),
+    )
+    episode_summary: str | None = Field(
+        default=None,
+        description=(
+            "If the request closed the episode (``X-Episode-Hint: close``), the "
+            "LLM-written summary persisted to ``episode.summary``. Otherwise "
+            "``None``. Phase 2."
+        ),
+    )
     model: str
     inference_time_ms: float
     usage: dict[str, int]
@@ -88,6 +119,33 @@ class FreeConvoResponse(BaseModel):
     )
     transcript: str | None = Field(
         default=None, description="Best-effort transcript of what the learner said."
+    )
+    learner_id: str | None = Field(
+        default=None,
+        description=(
+            "Resolved learner id used to build the system prompt (post-fallback "
+            "to the default profile). Phase 1A introduces this field."
+        ),
+    )
+    session_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite session row id this turn was recorded under. Phase 1B."
+        ),
+    )
+    episode_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite episode row id this turn was recorded under. Phase 1B."
+        ),
+    )
+    episode_summary: str | None = Field(
+        default=None,
+        description=(
+            "If the request closed the episode (``X-Episode-Hint: close``), the "
+            "LLM-written summary persisted to ``episode.summary``. Otherwise "
+            "``None``. Phase 2."
+        ),
     )
     model: str
     inference_time_ms: float
@@ -134,6 +192,33 @@ class VoiceMirrorSuggestResponse(BaseModel):
             "'Try saying: apple. A-P-P-L-E.'"
         ),
     )
+    learner_id: str | None = Field(
+        default=None,
+        description=(
+            "Resolved learner id used to build the system prompt (post-fallback "
+            "to the default profile). Phase 1A introduces this field."
+        ),
+    )
+    session_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite session row id this turn was recorded under. Phase 1B."
+        ),
+    )
+    episode_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite episode row id this turn was recorded under. Phase 1B."
+        ),
+    )
+    episode_summary: str | None = Field(
+        default=None,
+        description=(
+            "If the request closed the episode (``X-Episode-Hint: close``), the "
+            "LLM-written summary persisted to ``episode.summary``. Otherwise "
+            "``None``. Phase 2."
+        ),
+    )
     model: str
     inference_time_ms: float
     audio_url: str | None = None
@@ -157,6 +242,33 @@ class VoiceMirrorScoreResponse(BaseModel):
     feedback_text: str = Field(
         ...,
         description="Short tutor feedback line to be spoken back to the learner.",
+    )
+    learner_id: str | None = Field(
+        default=None,
+        description=(
+            "Resolved learner id used to build the system prompt (post-fallback "
+            "to the default profile). Phase 1A introduces this field."
+        ),
+    )
+    session_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite session row id this turn was recorded under. Phase 1B."
+        ),
+    )
+    episode_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite episode row id this turn was recorded under. Phase 1B."
+        ),
+    )
+    episode_summary: str | None = Field(
+        default=None,
+        description=(
+            "If the request closed the episode (``X-Episode-Hint: close``), the "
+            "LLM-written summary persisted to ``episode.summary``. Otherwise "
+            "``None``. Phase 2."
+        ),
     )
     model: str
     inference_time_ms: float
@@ -188,6 +300,33 @@ class VisionTeachResponse(BaseModel):
     )
     transcript: str | None = Field(
         default=None, description="Best-effort transcript of the learner's guess."
+    )
+    learner_id: str | None = Field(
+        default=None,
+        description=(
+            "Resolved learner id used to build the system prompt (post-fallback "
+            "to the default profile). Phase 1A introduces this field."
+        ),
+    )
+    session_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite session row id this turn was recorded under. Phase 1B."
+        ),
+    )
+    episode_id: int | None = Field(
+        default=None,
+        description=(
+            "SQLite episode row id this turn was recorded under. Phase 1B."
+        ),
+    )
+    episode_summary: str | None = Field(
+        default=None,
+        description=(
+            "If the request closed the episode (``X-Episode-Hint: close``), the "
+            "LLM-written summary persisted to ``episode.summary``. Otherwise "
+            "``None``. Phase 2."
+        ),
     )
     model: str
     inference_time_ms: float

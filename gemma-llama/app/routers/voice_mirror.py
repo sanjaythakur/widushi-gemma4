@@ -11,13 +11,22 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 
-from ..deps import get_adapter, get_model_config, get_tts_engine, get_tts_storage
+from ..deps import (
+    get_adapter,
+    get_context_engine,
+    get_episode_summariser,
+    get_model_config,
+    get_session_manager,
+    get_tts_engine,
+    get_tts_storage,
+)
 from ..errors import LlamaServerError
 from ..llama_adapter import LlamaAdapter, extract_content, extract_usage
 from ..media import build_user_content
 from ..media_multipart import read_audio_upload
+from ..memory import ContextEngine, EpisodeSummariser, SessionManager
 from ..model_config import ModelConfig
 from ..prompts import (
     render_voice_mirror_score_prompt,
@@ -35,6 +44,8 @@ from ..tts.voices import DEFAULT_PERSONALITY
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_MODE = "voice_mirror"
 
 
 _VALID_VERDICTS = ("praise", "correct", "retry")
@@ -147,17 +158,50 @@ def _parse_score(raw: str, target_word: str) -> dict[str, object]:
 )
 async def suggest(
     req: VoiceMirrorSuggestRequest,
+    x_learner_id: str | None = Header(
+        default=None,
+        alias="X-Learner-Id",
+        description="Learner profile id; defaults to 'kalzy' (Phase 1A).",
+    ),
+    x_session_id: int | None = Header(
+        default=None,
+        alias="X-Session-Id",
+        description="Session row id to resume; server-generated when absent (Phase 1B).",
+    ),
+    x_episode_hint: str | None = Header(
+        default=None,
+        alias="X-Episode-Hint",
+        description=(
+            "Runtime-orchestrator lifecycle hint. ``close`` closes the "
+            "active episode after this turn is recorded and runs the "
+            "Phase 2 summariser."
+        ),
+    ),
     adapter: LlamaAdapter = Depends(get_adapter),
     cfg: ModelConfig = Depends(get_model_config),
+    context_engine: ContextEngine = Depends(get_context_engine),
+    session_manager: SessionManager = Depends(get_session_manager),
+    episode_summariser: EpisodeSummariser = Depends(get_episode_summariser),
     tts_engine: PiperEngine | None = Depends(get_tts_engine),
     tts_storage: TTSStorage | None = Depends(get_tts_storage),
 ):
-    prompt = render_voice_mirror_suggest_prompt(
-        cfg, level=req.level, history=req.history
+    resolved_learner_id, learner_block = context_engine.build_learner_block(x_learner_id)
+    session = await session_manager.open_or_resume_session(
+        resolved_learner_id, x_session_id
     )
+    episode = await session_manager.open_or_resume_episode(session.id, _MODE)
+    user_prelude = await context_engine.build_user_prelude(session.id, episode.id)
+
+    prompt = render_voice_mirror_suggest_prompt(
+        cfg, level=req.level, history=req.history, learner_block=learner_block
+    )
+    # /voice-mirror/suggest is the only mode that bundles "system" + "user"
+    # into a single user message (no system role). Prepend the prelude on
+    # top so the running context still rides into the prompt tail.
+    full_prompt = f"{user_prelude}\n\n{prompt}" if user_prelude else prompt
     try:
         response = await adapter.chat_completion(
-            [{"role": "user", "content": prompt}],
+            [{"role": "user", "content": full_prompt}],
             # 512 leaves headroom for any ``<think>`` preamble Gemma 4
             # emits despite ``enable_thinking: false`` -- 256 was tight
             # enough that the JSON envelope was truncated and we silently
@@ -172,6 +216,27 @@ async def suggest(
 
     raw = extract_content(response)
     parsed = _parse_suggest(raw)
+    inference_ms = int(response.get("_inference_time_ms", 0.0))
+    usage = extract_usage(response)
+
+    await session_manager.record_turn(
+        episode.id,
+        role="user",
+        text="(suggest next word)",
+    )
+    await session_manager.record_turn(
+        episode.id,
+        role="assistant",
+        text=parsed["prompt_text"],
+        inference_ms=inference_ms,
+        usage=usage,
+    )
+
+    # Phase 2: honour X-Episode-Hint=close after the turn is persisted.
+    episode_summary = await episode_summariser.maybe_close_episode(
+        session, episode, hint=x_episode_hint
+    )
+
     tts_attach = await maybe_attach_file(
         parsed["prompt_text"],
         enabled=req.tts,
@@ -184,6 +249,10 @@ async def suggest(
         example_sentence=parsed["example_sentence"],
         ipa_hint=parsed["ipa_hint"] or None,
         prompt_text=parsed["prompt_text"],
+        learner_id=resolved_learner_id,
+        session_id=session.id,
+        episode_id=episode.id,
+        episode_summary=episode_summary,
         model=cfg.short_name,
         inference_time_ms=response.get("_inference_time_ms", 0.0),
         **tts_attach,
@@ -206,8 +275,30 @@ async def score(
     temperature: float | None = Form(None, ge=0.0, le=2.0),
     tts: bool = Form(False, description="If true, also render the feedback via Piper TTS."),
     voice: str = Form(DEFAULT_PERSONALITY, description="TTS personality id (see app/tts/voices.py)."),
+    x_learner_id: str | None = Header(
+        default=None,
+        alias="X-Learner-Id",
+        description="Learner profile id; defaults to 'kalzy' (Phase 1A).",
+    ),
+    x_session_id: int | None = Header(
+        default=None,
+        alias="X-Session-Id",
+        description="Session row id to resume; server-generated when absent (Phase 1B).",
+    ),
+    x_episode_hint: str | None = Header(
+        default=None,
+        alias="X-Episode-Hint",
+        description=(
+            "Runtime-orchestrator lifecycle hint. ``close`` closes the "
+            "active episode after this turn is recorded and runs the "
+            "Phase 2 summariser."
+        ),
+    ),
     adapter: LlamaAdapter = Depends(get_adapter),
     cfg: ModelConfig = Depends(get_model_config),
+    context_engine: ContextEngine = Depends(get_context_engine),
+    session_manager: SessionManager = Depends(get_session_manager),
+    episode_summariser: EpisodeSummariser = Depends(get_episode_summariser),
     tts_engine: PiperEngine | None = Depends(get_tts_engine),
     tts_storage: TTSStorage | None = Depends(get_tts_storage),
 ):
@@ -226,13 +317,26 @@ async def score(
 
     audio_url = await read_audio_upload(audio)
 
-    system_prompt = render_voice_mirror_score_prompt(cfg, target_word=target)
+    resolved_learner_id, learner_block = context_engine.build_learner_block(x_learner_id)
+    session = await session_manager.open_or_resume_session(
+        resolved_learner_id, x_session_id
+    )
+    episode = await session_manager.open_or_resume_episode(session.id, _MODE)
+    user_prelude = await context_engine.build_user_prelude(session.id, episode.id)
+
+    system_prompt = render_voice_mirror_score_prompt(
+        cfg, target_word=target, learner_block=learner_block
+    )
+    base_instruction = f"My attempt at the word '{target}' is attached."
+    user_text = (
+        f"{user_prelude}\n\n{base_instruction}" if user_prelude else base_instruction
+    )
     messages = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": build_user_content(
-                f"My attempt at the word '{target}' is attached.",
+                user_text,
                 audio_urls=[audio_url],
             ),
         },
@@ -251,8 +355,56 @@ async def score(
 
     raw = extract_content(response)
     parsed = _parse_score(raw, target)
+    transcript = parsed.get("transcript")
+    feedback_text = str(parsed["feedback_text"])
+    verdict = str(parsed["verdict"])
+    inference_ms = int(response.get("_inference_time_ms", 0.0))
+    usage = extract_usage(response)
+
+    await session_manager.record_turn(
+        episode.id,
+        role="user",
+        text=(
+            transcript
+            if isinstance(transcript, str)
+            else f"(attempt at '{target}')"
+        ),
+        media_kind="audio",
+    )
+    await session_manager.record_turn(
+        episode.id,
+        role="assistant",
+        text=feedback_text,
+        inference_ms=inference_ms,
+        usage=usage,
+    )
+
+    # PRD §Phase 1B test plan: episode.state_json must surface the list of
+    # words actually drilled so the operator can verify continuity via
+    # GET /sessions/{id}. We count "praise" and "correct" verdicts as a
+    # successful drill; "retry" attempts get logged as turns but don't
+    # advance state_json.words_drilled.
+    if verdict in {"praise", "correct"}:
+        def _append_word(state: dict[str, object]) -> dict[str, object]:
+            words = state.get("words_drilled")
+            if not isinstance(words, list):
+                words = []
+            else:
+                words = [str(w) for w in words]
+            words.append(target)
+            return {**state, "words_drilled": words}
+
+        await session_manager.update_episode_state(episode.id, _append_word)
+
+    # Phase 2: honour X-Episode-Hint=close after the turn + state mutation.
+    # The summariser sees the latest words_drilled because the state write
+    # above lands before we read the turn transcript inside the summariser.
+    episode_summary = await episode_summariser.maybe_close_episode(
+        session, episode, hint=x_episode_hint
+    )
+
     tts_attach = await maybe_attach_file(
-        str(parsed["feedback_text"]),
+        feedback_text,
         enabled=tts,
         voice=voice,
         engine=tts_engine,
@@ -260,11 +412,15 @@ async def score(
     )
     return VoiceMirrorScoreResponse(
         target_word=target,
-        transcript=parsed.get("transcript"),
+        transcript=transcript,
         verdict=parsed["verdict"],
-        feedback_text=str(parsed["feedback_text"]),
+        feedback_text=feedback_text,
+        learner_id=resolved_learner_id,
+        session_id=session.id,
+        episode_id=episode.id,
+        episode_summary=episode_summary,
         model=cfg.short_name,
         inference_time_ms=response.get("_inference_time_ms", 0.0),
-        usage=extract_usage(response),
+        usage=usage,
         **tts_attach,
     )

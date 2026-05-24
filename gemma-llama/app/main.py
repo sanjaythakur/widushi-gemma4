@@ -19,8 +19,16 @@ from fastapi.templating import Jinja2Templates
 
 from .config import get_settings
 from .llama_adapter import LlamaAdapter
+from .memory import (
+    ContextEngine,
+    Database,
+    EpisodeSummariser,
+    LearnerLoader,
+    SessionManager,
+    SummariserConfig,
+)
 from .model_config import load_model_config
-from .routers import audio, free_convo, presets, vision, voice_mirror
+from .routers import audio, free_convo, presets, sessions, vision, voice_mirror
 from .schemas import HealthResponse
 from .tts import DEFAULT_PERSONALITY, PERSONALITIES, PiperEngine
 from .tts.router import router as tts_router
@@ -55,6 +63,51 @@ async def lifespan(app: FastAPI):
     await adapter.start()
 
     # ------------------------------------------------------------------
+    # Memory layer.
+    #   Phase 1A: file-backed learner profiles (LearnerLoader).
+    #   Phase 1B: SQLite-backed session / episode / turn persistence
+    #             (Database + SessionManager). The LearnerLoader's mtime
+    #             cache and the single sqlite3 connection both survive
+    #             across requests because we build them here once.
+    #   Phase 2:  EpisodeSummariser handles X-Episode-Hint=close +
+    #             rolling session summary on every Nth episode close.
+    # ------------------------------------------------------------------
+    learner_loader = LearnerLoader(Path(settings.learner_profiles_dir))
+    db = Database(settings.sqlite_path)
+    await db.start()
+    session_manager = SessionManager(
+        db,
+        idle_timeout_seconds=settings.session_idle_timeout_seconds,
+        working_k_turns=settings.working_block_k_turns,
+        episodic_max_episodes=settings.episodic_block_max_episodes,
+        episodic_turns_per_episode=settings.episodic_block_turns_per_episode,
+    )
+    context_engine = ContextEngine(
+        learner_loader,
+        session_manager=session_manager,
+        working_k_turns=settings.working_block_k_turns,
+        episodic_max_episodes=settings.episodic_block_max_episodes,
+        episodic_turns_per_episode=settings.episodic_block_turns_per_episode,
+    )
+    episode_summariser = EpisodeSummariser(
+        adapter,
+        session_manager,
+        config=SummariserConfig(
+            max_tokens=settings.episode_summary_max_tokens,
+            temperature=settings.episode_summary_temperature,
+            rolling_every_n_closes=settings.rolling_summary_every_n_closes,
+        ),
+    )
+    logger.info(
+        "context engine ready (learner_profiles_dir=%s sqlite_path=%s "
+        "summariser_max_tokens=%d rolling_every_n=%d)",
+        settings.learner_profiles_dir,
+        settings.sqlite_path,
+        settings.episode_summary_max_tokens,
+        settings.rolling_summary_every_n_closes,
+    )
+
+    # ------------------------------------------------------------------
     # TTS subsystem -- best-effort start. A missing binary or empty
     # voices dir leaves the engine in ready=False, which the router
     # helpers honour by returning ``audio_error`` instead of failing.
@@ -78,6 +131,10 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.model_config = cfg
     app.state.adapter = adapter
+    app.state.context_engine = context_engine
+    app.state.db = db
+    app.state.session_manager = session_manager
+    app.state.episode_summariser = episode_summariser
     app.state.tts_engine = tts_engine
     app.state.tts_storage = tts_storage
     try:
@@ -86,6 +143,7 @@ async def lifespan(app: FastAPI):
         await tts_storage.stop_janitor()
         await tts_engine.stop()
         await adapter.stop()
+        await db.close()
 
 
 app = FastAPI(
@@ -184,3 +242,4 @@ app.include_router(vision.router, tags=["modes"])
 app.include_router(audio.router, tags=["modes"])
 app.include_router(tts_router, tags=["tts"])
 app.include_router(presets.router, tags=["playground"])
+app.include_router(sessions.router, tags=["ops"])

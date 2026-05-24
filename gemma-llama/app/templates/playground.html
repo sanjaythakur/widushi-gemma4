@@ -43,6 +43,27 @@
     </div>
   </header>
 
+  <!-- ============================ Session panel (Phase 1B) ===========================
+       Captures the `session_id` returned by every mode endpoint and auto-injects
+       it into every subsequent request's `X-Session-Id` header. This is what
+       makes the Phase 1B multi-step presets (kalzy-session-step-1/2,
+       kalzy-drill-step-1/2, kalzy-cross-mode-followup) a five-click demo
+       instead of a five-paste-the-id demo. The Reset button calls
+       POST /sessions/{id}/end so a fresh story can start cleanly; Inspect
+       hits GET /sessions/{id} and pretty-prints the result. -->
+  <section class="mb-4 bg-white border border-slate-200 rounded-lg p-3" id="session-panel">
+    <div class="flex flex-wrap items-center gap-3 text-sm">
+      <div>
+        <span class="text-slate-600">Active session:</span>
+        <span id="session-id-badge" class="font-mono ml-1 px-2 py-0.5 rounded bg-slate-100">none</span>
+      </div>
+      <button id="session-inspect" class="px-2 py-1 rounded border border-slate-300 hover:bg-slate-50 disabled:opacity-40" disabled>Inspect</button>
+      <button id="session-reset"   class="px-2 py-1 rounded border border-slate-300 hover:bg-slate-50 disabled:opacity-40" disabled>Reset session</button>
+      <span id="session-status" class="text-xs text-slate-500 ml-auto"></span>
+    </div>
+    <pre id="session-inspect-out" class="mt-2 p-3 bg-slate-100 rounded text-xs hidden"></pre>
+  </section>
+
   <nav class="flex flex-wrap gap-2 mb-4" id="tabs">
     <button data-tab="free-convo"     class="tab px-3 py-1.5 rounded border border-slate-300 tab-active">FreeConvo</button>
     <button data-tab="vm-suggest"     class="tab px-3 py-1.5 rounded border border-slate-300">VoiceMirror &middot; suggest</button>
@@ -276,16 +297,122 @@ bindPreview("vt-image", "vt-image-preview", "image");
 //
 // The api container reads `manifest.json` from /api/presets (mounted from
 // `./api-presets` on the host). For each preset we know:
-//   { id, label, body?, form?, files? }
+//   { id, label, body?, form?, files?, headers? }
 //
-// `body`  -> JSON body fields, merged into the request when posting JSON.
-// `form`  -> form fields (target_word, etc.) merged into multipart.
-// `files` -> map of form-field-name -> manifest relpath; fetched as a Blob
-//            and stuffed into the matching <input type=file> via DataTransfer.
+// `body`    -> JSON body fields, merged into the request when posting JSON.
+// `form`    -> form fields (target_word, etc.) merged into multipart.
+// `files`   -> map of form-field-name -> manifest relpath; fetched as a Blob
+//              and stuffed into the matching <input type=file> via DataTransfer.
+// `headers` -> map of HTTP-header-name -> string; merged into the run
+//              fetch(). Forwarded generically: Phase 1A uses this for
+//              X-Learner-Id, Phase 2 adds X-Episode-Hint (e.g. "close").
 //
 // The dropdown is injected into each `[data-preset-slot]` placeholder.
 // ---------------------------------------------------------------------------
 let PRESETS = null; // populated by loadPresets()
+
+// Per-endpoint active header overrides applied by the most recently
+// loaded preset on that endpoint. Cleared when the user picks the empty
+// "(custom -- fill in below)" option so a stale preset's X-Learner-Id
+// doesn't bleed into a hand-filled run.
+const ACTIVE_HEADERS = {};
+
+// ---------------------------------------------------------------------------
+// Session panel (Phase 1B)
+//
+// Holds the `session_id` we extract from the most recent mode-endpoint
+// response and auto-injects it into every subsequent fetch via the
+// `X-Session-Id` header. Persisted to localStorage so the multi-step
+// preset story survives a page reload (and accidental tab close).
+// ---------------------------------------------------------------------------
+const SESSION_KEY = "widushi.session_id";
+let ACTIVE_SESSION_ID = null;
+
+function loadSessionId() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (raw) {
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n > 0) ACTIVE_SESSION_ID = n;
+    }
+  } catch {}
+  renderSessionBadge();
+}
+
+function setActiveSession(id, opts) {
+  const n = typeof id === "number" ? id : parseInt(id, 10);
+  if (!Number.isFinite(n) || n <= 0) return;
+  if (ACTIVE_SESSION_ID === n) return;
+  ACTIVE_SESSION_ID = n;
+  try { localStorage.setItem(SESSION_KEY, String(n)); } catch {}
+  renderSessionBadge();
+  if (opts && opts.statusText) setSessionStatus(opts.statusText);
+}
+
+function clearActiveSession() {
+  ACTIVE_SESSION_ID = null;
+  try { localStorage.removeItem(SESSION_KEY); } catch {}
+  renderSessionBadge();
+}
+
+function renderSessionBadge() {
+  const badge = $("session-id-badge");
+  const reset = $("session-reset");
+  const inspect = $("session-inspect");
+  if (!badge) return;
+  if (ACTIVE_SESSION_ID) {
+    badge.textContent = String(ACTIVE_SESSION_ID);
+    badge.className = "font-mono ml-1 px-2 py-0.5 rounded bg-emerald-100 text-emerald-800";
+    if (reset) reset.disabled = false;
+    if (inspect) inspect.disabled = false;
+  } else {
+    badge.textContent = "none";
+    badge.className = "font-mono ml-1 px-2 py-0.5 rounded bg-slate-100";
+    if (reset) reset.disabled = true;
+    if (inspect) inspect.disabled = true;
+  }
+}
+
+function setSessionStatus(text) {
+  const el = $("session-status");
+  if (!el) return;
+  el.textContent = text || "";
+  if (text) setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 4000);
+}
+
+// Merge the active session header into a per-endpoint override dict.
+// Returns a new object; never mutates ACTIVE_HEADERS in place.
+function withSessionHeader(extraHeaders) {
+  const base = extraHeaders ? { ...extraHeaders } : {};
+  if (ACTIVE_SESSION_ID && !base["X-Session-Id"]) {
+    base["X-Session-Id"] = String(ACTIVE_SESSION_ID);
+  }
+  return base;
+}
+
+// Inspect parsed JSON response (or fetch Response headers) for a session_id
+// and pin it as the active session for subsequent requests.
+function captureSessionFromJson(parsed) {
+  if (!parsed || typeof parsed !== "object") return;
+  if (typeof parsed.session_id === "number" && parsed.session_id > 0) {
+    const isNew = parsed.session_id !== ACTIVE_SESSION_ID;
+    setActiveSession(parsed.session_id, {
+      statusText: isNew ? `captured session #${parsed.session_id}` : "",
+    });
+  }
+}
+function captureSessionFromResponseHeaders(res) {
+  const sid = res && res.headers && res.headers.get("X-Session-Id");
+  if (sid) {
+    const n = parseInt(sid, 10);
+    if (Number.isFinite(n) && n > 0) {
+      const isNew = n !== ACTIVE_SESSION_ID;
+      setActiveSession(n, {
+        statusText: isNew ? `captured session #${n}` : "",
+      });
+    }
+  }
+}
 
 async function loadPresets() {
   try {
@@ -326,6 +453,7 @@ function renderPresetSelectors() {
     sel.addEventListener("change", () => {
       if (sel.value === "") {
         stat.textContent = "";
+        delete ACTIVE_HEADERS[key];
         return;
       }
       applyPreset(key, sel.value, stat);
@@ -336,14 +464,26 @@ function renderPresetSelectors() {
 async function applyPreset(endpointKey, indexStr, statusEl) {
   if (indexStr === "" || indexStr === null) {
     statusEl.textContent = "no preset selected.";
+    delete ACTIVE_HEADERS[endpointKey];
     return;
   }
   const preset = (PRESETS[endpointKey] || [])[Number(indexStr)];
   if (!preset) {
     statusEl.textContent = "preset not found.";
+    delete ACTIVE_HEADERS[endpointKey];
     return;
   }
   statusEl.textContent = "loading...";
+
+  // Headers come from the manifest (Phase 1A: X-Learner-Id, Phase 2:
+  // X-Episode-Hint). Capture them here so the next run-button click can
+  // inject them into fetch() -- the merge is generic so any header
+  // declared on a preset rides through unchanged.
+  if (preset.headers && typeof preset.headers === "object") {
+    ACTIVE_HEADERS[endpointKey] = { ...preset.headers };
+  } else {
+    delete ACTIVE_HEADERS[endpointKey];
+  }
 
   try {
     // ---- 1. populate input fields per endpoint ------------------------
@@ -420,6 +560,44 @@ function escapeHtml(s) {
 }
 
 loadPresets();
+loadSessionId();
+
+// ---------------------------------------------------------------------------
+// Session panel wiring (Phase 1B)
+// ---------------------------------------------------------------------------
+$("session-inspect").addEventListener("click", async () => {
+  if (!ACTIVE_SESSION_ID) return;
+  const out = $("session-inspect-out");
+  out.classList.remove("hidden");
+  out.textContent = "(loading...)";
+  try {
+    const res = await fetch(`/sessions/${ACTIVE_SESSION_ID}`);
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text);
+      out.textContent = JSON.stringify(parsed, null, 2);
+    } catch {
+      out.textContent = `HTTP ${res.status}\n${text}`;
+    }
+  } catch (e) {
+    out.textContent = `error: ${e.message || e}`;
+  }
+});
+
+$("session-reset").addEventListener("click", async () => {
+  if (!ACTIVE_SESSION_ID) return;
+  const id = ACTIVE_SESSION_ID;
+  setSessionStatus(`closing session #${id}...`);
+  try {
+    await fetch(`/sessions/${id}/end`, { method: "POST" });
+  } catch (e) {
+    console.warn("session end failed:", e);
+  }
+  clearActiveSession();
+  const out = $("session-inspect-out");
+  if (out) { out.classList.add("hidden"); out.textContent = ""; }
+  setSessionStatus(`closed session #${id}`);
+});
 
 // ---------------------------------------------------------------------------
 // NDJSON streaming reader (only /audio/listen uses this)
@@ -480,33 +658,46 @@ function maybePlayResponseAudio(parsed) {
   else if (parsed.audio_base64) ttsEnqueueB64(parsed.audio_base64, parsed.audio_mime || "audio/wav");
 }
 
-async function postJSON(path, body, outEl) {
+async function postJSON(path, body, outEl, extraHeaders) {
   outEl.textContent = "(running...)";
   ttsResetQueue();
+  const merged = withSessionHeader(extraHeaders);
+  const headers = { "Content-Type": "application/json", ...merged };
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
   const text = await res.text();
   try {
     const parsed = JSON.parse(text);
     outEl.textContent = JSON.stringify(parsed, null, 2);
+    captureSessionFromJson(parsed);
     maybePlayResponseAudio(parsed);
   } catch {
     outEl.textContent = `HTTP ${res.status}\n${text}`;
   }
 }
 
-async function postMultipart(path, formData, outEl, stream) {
+async function postMultipart(path, formData, outEl, stream, extraHeaders) {
   outEl.textContent = "(uploading...)";
   ttsResetQueue();
-  const res = await fetch(path, { method: "POST", body: formData });
-  if (stream) return streamNDJSON(res, outEl);
+  // Note: do NOT set Content-Type for multipart -- the browser must
+  // generate the boundary. We only forward custom headers (e.g.
+  // X-Learner-Id from a preset + X-Session-Id from the Session panel).
+  const merged = withSessionHeader(extraHeaders);
+  const init = { method: "POST", body: formData };
+  if (Object.keys(merged).length) init.headers = merged;
+  const res = await fetch(path, init);
+  if (stream) {
+    captureSessionFromResponseHeaders(res);
+    return streamNDJSON(res, outEl);
+  }
   const text = await res.text();
   try {
     const parsed = JSON.parse(text);
     outEl.textContent = JSON.stringify(parsed, null, 2);
+    captureSessionFromJson(parsed);
     maybePlayResponseAudio(parsed);
   } catch {
     outEl.textContent = `HTTP ${res.status}\n${text}`;
@@ -535,7 +726,8 @@ document.querySelectorAll(".run").forEach((btn) => {
         if ($("fc-max").value)  fd.append("max_tokens", $("fc-max").value);
         if ($("fc-temp").value) fd.append("temperature", $("fc-temp").value);
         appendTTS(fd);
-        await postMultipart("/free-convo/turn", fd, $("fc-out"), false);
+        await postMultipart("/free-convo/turn", fd, $("fc-out"), false,
+          ACTIVE_HEADERS["free-convo/turn"]);
 
       } else if (ep === "vm-suggest") {
         const body = {};
@@ -545,7 +737,8 @@ document.querySelectorAll(".run").forEach((btn) => {
             .split(",").map((s) => s.trim()).filter(Boolean);
         }
         if (ttsEnabled()) { body.tts = true; body.voice = ttsVoice(); }
-        await postJSON("/voice-mirror/suggest", body, $("vs-out"));
+        await postJSON("/voice-mirror/suggest", body, $("vs-out"),
+          ACTIVE_HEADERS["voice-mirror/suggest"]);
 
       } else if (ep === "vm-score") {
         const file = $("vc-file").files[0];
@@ -558,7 +751,8 @@ document.querySelectorAll(".run").forEach((btn) => {
         if ($("vc-max").value)  fd.append("max_tokens", $("vc-max").value);
         if ($("vc-temp").value) fd.append("temperature", $("vc-temp").value);
         appendTTS(fd);
-        await postMultipart("/voice-mirror/score", fd, $("vc-out"), false);
+        await postMultipart("/voice-mirror/score", fd, $("vc-out"), false,
+          ACTIVE_HEADERS["voice-mirror/score"]);
 
       } else if (ep === "vision-teach") {
         const img = $("vt-image").files[0];
@@ -570,7 +764,8 @@ document.querySelectorAll(".run").forEach((btn) => {
         if ($("vt-max").value)  fd.append("max_tokens", $("vt-max").value);
         if ($("vt-temp").value) fd.append("temperature", $("vt-temp").value);
         appendTTS(fd);
-        await postMultipart("/vision/teach-object", fd, $("vt-out"), false);
+        await postMultipart("/vision/teach-object", fd, $("vt-out"), false,
+          ACTIVE_HEADERS["vision/teach-object"]);
 
       } else if (ep === "audio-listen") {
         const file = $("al-file").files[0];
@@ -583,7 +778,8 @@ document.querySelectorAll(".run").forEach((btn) => {
         const stream = $("al-stream").checked;
         if (stream) fd.append("stream", "true");
         appendTTS(fd);
-        await postMultipart("/audio/listen", fd, $("al-out"), stream);
+        await postMultipart("/audio/listen", fd, $("al-out"), stream,
+          ACTIVE_HEADERS["audio/listen"]);
       }
     } catch (e) {
       alert(e.message || String(e));

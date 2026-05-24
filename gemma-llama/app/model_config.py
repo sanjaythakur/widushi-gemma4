@@ -27,12 +27,25 @@ class GenerationDefaults(BaseModel):
     thinking: bool = True
 
 
+# Every prompt below opens with a Jinja-conditional ``{{ learner_block }}``
+# header. When the memory layer renders the block (Phase 1A: hardcoded
+# Kalzy profile) it lands at the very head of the system prompt, where
+# llama.cpp's prompt-prefix cache (LLAMA_CACHE_PROMPT=true) keeps it warm
+# across back-to-back turns under the same learner. When the block is
+# empty (no profile loaded, or backwards-compat call sites that don't
+# pass it), the conditional collapses to the empty string so the prompt
+# is byte-identical to the pre-memory baseline.
+_LEARNER_HEADER = "{% if learner_block %}{{ learner_block }}\n\n{% endif %}"
+
+
 _DEFAULT_AUDIO_LISTEN = (
+    f"{_LEARNER_HEADER}"
     "You are a friendly classroom tutor. The student's spoken question is "
     "attached as audio. Understand it, then answer at a level appropriate for "
     "a curious learner. Keep the answer concise, accurate, and conversational."
 )
 _DEFAULT_FREE_CONVO = (
+    f"{_LEARNER_HEADER}"
     "You are Widushi, a warm voice tutor talking with a Hindi-speaking learner "
     "who wants to improve their English. The learner's spoken turn is attached "
     "as audio. You may accept Hindi or Hinglish input, but always reply in "
@@ -48,6 +61,7 @@ _DEFAULT_FREE_CONVO = (
     "structured English practice now. No commentary, no markdown, no preamble."
 )
 _DEFAULT_VOICE_MIRROR_SUGGEST = (
+    f"{_LEARNER_HEADER}"
     "You are Widushi, a pronunciation coach picking the NEXT English word for "
     "a Hindi-speaking beginner to practise.{% if level %} Learner level: "
     "{{ level }}.{% endif %}{% if history %} Avoid these already-practised "
@@ -64,6 +78,7 @@ _DEFAULT_VOICE_MIRROR_SUGGEST = (
     "No markdown, no preamble."
 )
 _DEFAULT_VOICE_MIRROR_SCORE = (
+    f"{_LEARNER_HEADER}"
     "You are Widushi, a kind pronunciation coach. The learner was asked to "
     "say the English word \"{{ target_word }}\". Their spoken attempt is "
     "attached as audio. Transcribe the attempt, decide how close it was, and "
@@ -77,6 +92,7 @@ _DEFAULT_VOICE_MIRROR_SCORE = (
     "learner (no more than 18 words). No markdown, no preamble."
 )
 _DEFAULT_VISION_TEACH = (
+    f"{_LEARNER_HEADER}"
     "You are Widushi, a vocabulary tutor for a Hindi-speaking English "
     "learner. The learner is holding an object in front of a camera and "
     "speaking their guess for its English name. The image and their spoken "

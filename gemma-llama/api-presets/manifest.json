@@ -19,6 +19,30 @@
       "id": "hinglish-chit-chat",
       "label": "Hinglish: \"Aaj mausam achha hai, kya scene hai?\" (start_learning=false)",
       "files": { "audio": "free-convo/hinglish-chitchat.wav" }
+    },
+    {
+      "id": "kalzy-who-am-i",
+      "label": "[Phase 1A] Kalzy: \"What is my name?\" (reply should name Kalzy)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "files": { "audio": "free-convo/what-is-my-name.wav" }
+    },
+    {
+      "id": "kalzy-where-do-i-live",
+      "label": "[Phase 1A] Kalzy: \"Where do I live?\" (reply should mention Gangtok)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "files": { "audio": "free-convo/where-do-i-live.wav" }
+    },
+    {
+      "id": "kalzy-session-step-1",
+      "label": "[Phase 1B step 1] Kalzy: \"I love walking in the mountains.\" (capture session_id from response)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "files": { "audio": "free-convo/i-love-mountains.wav" }
+    },
+    {
+      "id": "kalzy-session-step-2",
+      "label": "[Phase 1B step 2] Kalzy: \"What did I just say I love?\" (auto-fills X-Session-Id; reply must say mountains)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "files": { "audio": "free-convo/what-did-i-say-i-love.wav" }
     }
   ],
 
@@ -41,6 +65,18 @@
     {
       "id": "no-hints",
       "label": "No hints at all (model picks freely)",
+      "body": {}
+    },
+    {
+      "id": "kalzy-intermediate-pick",
+      "label": "[Phase 1A] Kalzy, no body (learner block should imply intermediate, not toy-tier)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "body": {}
+    },
+    {
+      "id": "kalzy-fallback-unknown",
+      "label": "[Phase 1A] Unknown learner_id (loader falls back to Kalzy; check api logs for warning)",
+      "headers": { "X-Learner-Id": "unknown_user" },
       "body": {}
     }
   ],
@@ -69,6 +105,27 @@
       "label": "Mumbled / unclear \"river\" (expected verdict: retry)",
       "form": { "target_word": "river" },
       "files": { "audio": "voice-mirror-score/river-mumbled.wav" }
+    },
+    {
+      "id": "kalzy-drill-step-1",
+      "label": "[Phase 1B step 3] Kalzy drills \"apple\" (recorded as a turn in the active session)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "form": { "target_word": "apple" },
+      "files": { "audio": "voice-mirror-score/apple-clean.wav" }
+    },
+    {
+      "id": "kalzy-drill-step-2",
+      "label": "[Phase 1B step 4] Kalzy drills \"river\" (episode state_json should now hold [apple, river])",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "form": { "target_word": "river" },
+      "files": { "audio": "voice-mirror-score/river-mumbled.wav" }
+    },
+    {
+      "id": "kalzy-finish-drill",
+      "label": "[Phase 2] Kalzy finishes the drill (X-Episode-Hint: close -> response carries episode_summary)",
+      "headers": { "X-Learner-Id": "kalzy", "X-Episode-Hint": "close" },
+      "form": { "target_word": "apple" },
+      "files": { "audio": "voice-mirror-score/apple-clean.wav" }
     }
   ],
 
@@ -127,6 +184,30 @@
       "id": "hinglish-question",
       "label": "Hinglish: \"Yeh English mein kya hai?\"",
       "files": { "audio": "audio-listen/hinglish-question.wav" }
+    },
+    {
+      "id": "kalzy-roleplay-greeting",
+      "label": "[Phase 1A] Kalzy reuses shopkeeper greeting (reply should respect intermediate Nepali-L1 framing)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "files": { "audio": "audio-listen/roleplay-shopkeeper-greeting.wav" }
+    },
+    {
+      "id": "kalzy-cross-mode-followup",
+      "label": "[Phase 1B step 5] Kalzy: \"What words have we practised today?\" (episodic block crosses mode boundary)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "files": { "audio": "audio-listen/words-practised-today.wav" }
+    },
+    {
+      "id": "kalzy-recall-after-summary",
+      "label": "[Phase 2] Kalzy: \"What did we practise earlier?\" (reply must quote the episode SUMMARY, not raw turns)",
+      "headers": { "X-Learner-Id": "kalzy" },
+      "files": { "audio": "audio-listen/what-did-we-practise.wav" }
+    },
+    {
+      "id": "kalzy-finish-roleplay",
+      "label": "[Phase 2] Kalzy closes a roleplay episode (X-Episode-Hint: close -> response carries episode_summary)",
+      "headers": { "X-Learner-Id": "kalzy", "X-Episode-Hint": "close" },
+      "files": { "audio": "audio-listen/roleplay-shopkeeper-greeting.wav" }
     }
   ]
 }

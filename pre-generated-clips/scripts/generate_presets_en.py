@@ -52,6 +52,56 @@ PRESETS: list[tuple[str, str]] = [
     # VisionMode -- correct English guess paired with vision-teach/apple.jpg.
     ("vision-teach/apple-guess.wav",
      "Apple."),
+
+    # ---------------------------------------------------------------------
+    # Memory PRD presets (see ../gemma-llama/specs/memory.md). Each phase's
+    # test plan references one or more of the clips below; the manifest
+    # rows that wire them up land with that phase's PR.
+    # ---------------------------------------------------------------------
+
+    # Phase 1A -- learner profile reached the model. Kalzy's profile carries
+    # her name + location, so these two questions are the cheapest possible
+    # check that `learner_block` is hitting the prompt.
+    ("free-convo/what-is-my-name.wav",
+     "What is my name?"),
+    ("free-convo/where-do-i-live.wav",
+     "Where do I live?"),
+
+    # Phase 1B -- multi-turn session continuity. Step 1 says something
+    # opinionated; step 2 asks the model to recall it from the working
+    # block. Wording is intentionally short so step 2's "I just said" is
+    # unambiguous.
+    ("free-convo/i-love-mountains.wav",
+     "I love walking in the mountains."),
+    ("free-convo/what-did-i-say-i-love.wav",
+     "What did I just say I love?"),
+
+    # Phase 1B / Phase 2 -- cross-episode recall ("we drilled apple, river
+    # earlier"). Phase 1B uses the working-block version; Phase 2 reuses
+    # the same clip after the summariser collapses the turns.
+    ("audio-listen/words-practised-today.wav",
+     "What words have we practised today?"),
+    ("audio-listen/what-did-we-practise.wav",
+     "What did we practise earlier?"),
+
+    # Phase 3 -- post-onboarding "did you hear me" sanity ping for a brand
+    # new learner_id. Re-used by the "switch back to Kalzy" preset to
+    # demonstrate that the same audio routes differently per X-Learner-Id.
+    ("free-convo/can-you-hear-me.wav",
+     "Hi, can you hear me?"),
+
+    # Phase 4 -- curriculum-block reached the model. "How do I order
+    # coffee politely?" is the canonical Chapter 3 (Café) probe and is
+    # also reused after the path flips to Accelerated so the operator can
+    # eyeball the change in reply density.
+    ("audio-listen/how-do-i-order-coffee.wav",
+     "How do I order coffee politely?"),
+
+    # Phase 5 -- learner asks the tutor to surface their stumble history.
+    # The expected reply names words written to `skill_note`, proving
+    # retrieval reached the prompt.
+    ("audio-listen/what-words-wrong.wav",
+     "What words do I keep getting wrong?"),
 ]
 
 VOICE = "en_US-lessac-medium"

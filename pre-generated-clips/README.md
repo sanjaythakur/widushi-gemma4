@@ -115,6 +115,29 @@ docker run --rm -v "$PWD:/work" piper-clips
 docker run --rm -v "$PWD:/work" -e HF_TOKEN=<token> indic-clips
 ```
 
+## Memory PRD presets
+
+`generate_presets_en.py` and `generate_presets_hi.py` also produce the
+audio used by the memory / context-engine roll-out in
+[`../gemma-llama/specs/memory.md`](../gemma-llama/specs/memory.md).
+Phases 1A, 1B, 3, 4 and 5 each reference one or more of these clips in
+their playground test plans:
+
+- **English (Piper)**: `free-convo/what-is-my-name.wav`,
+  `free-convo/where-do-i-live.wav`, `free-convo/i-love-mountains.wav`,
+  `free-convo/what-did-i-say-i-love.wav`,
+  `free-convo/can-you-hear-me.wav`,
+  `audio-listen/words-practised-today.wav`,
+  `audio-listen/what-did-we-practise.wav`,
+  `audio-listen/how-do-i-order-coffee.wav`,
+  `audio-listen/what-words-wrong.wav`.
+- **Hindi-pipeline (Indic-Parler, mumbled voice)**:
+  `voice-mirror-score/thursday-mumbled.wav` -- Phase 5 stumble seed.
+
+All of the above land via `make presets` like every other preset clip;
+the script entries are idempotent so re-running on a populated tree is a
+no-op.
+
 ## Notes
 
 - `ai4bharat/indic-parler-tts` is gated on HuggingFace, so the Hindi
