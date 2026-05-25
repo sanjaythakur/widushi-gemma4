@@ -30,6 +30,8 @@ class Palette:
     accent_listening: tuple[int, int, int] = (66, 196, 188)  # teal
     accent_thinking: tuple[int, int, int] = (240, 180, 70)   # amber
     accent_speaking: tuple[int, int, int] = (240, 110, 110)  # coral
+    accent_happy: tuple[int, int, int] = (130, 220, 150)     # mint
+    accent_worried: tuple[int, int, int] = (220, 170, 90)    # soft amber
 
 
 PALETTE = Palette()

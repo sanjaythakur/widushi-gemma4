@@ -24,6 +24,7 @@ from app.modes.registry import (
     build_default_registry,
 )
 from app.modes.roleplay import RolePlayMode
+from app.modes.substate import ModeSubState, SubStateMachine
 from app.modes.tutor import TutorMode
 from app.modes.vision import VisionMode
 from app.modes.voice_mirror import VoiceMirrorMode
@@ -35,8 +36,10 @@ __all__ = [
     "Mode",
     "ModeFactory",
     "ModeRegistry",
+    "ModeSubState",
     "RolePlayMode",
     "SYSTEM_PROMPT_HINGLISH",
+    "SubStateMachine",
     "TutorMode",
     "UnknownModeError",
     "VisionMode",

@@ -349,6 +349,10 @@ class WakeWordSource(InputSource):
             log.info("no spoken question detected; returning to idle")
             return {
                 "cancel_reason": "no_voice_detected",
+                # ``reason`` is the canonical key the active Mode can
+                # inspect via ``handle_event`` to intercept silence
+                # CANCELs (e.g. VoiceMirrorMode -> CalmAndRetry).
+                "reason": "silence",
                 "sample_rate": OPENWAKEWORD_SAMPLE_RATE,
             }
 

@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from app.events import Event
+from app.modes.substate import ModeSubState, SubStateListener, SubStateMachine
 from app.services.gemma import GemmaReply
 
 if TYPE_CHECKING:  # avoid circular import; only used for type hints
@@ -59,6 +60,10 @@ class Mode:
     def __init__(self) -> None:
         self._episode_history: list[EpisodeTurn] = []
         self._pending_mode_change: dict[str, Any] | None = None
+        # Subclasses with an explicit sub-FSM assign a SubStateMachine
+        # here in their ``__init__``; modes that don't bother keep the
+        # legacy single-state behavior (``current_substate`` is ``None``).
+        self._substates: SubStateMachine | None = None
 
     # ------------------------------------------------------------------
     # Prompts
@@ -134,6 +139,36 @@ class Mode:
 
     def reset_history(self) -> None:
         self._episode_history.clear()
+
+    # ------------------------------------------------------------------
+    # Sub-FSM (opt-in)
+    # ------------------------------------------------------------------
+
+    @property
+    def substate_machine(self) -> SubStateMachine | None:
+        """Optional sub-FSM coordinator. ``None`` for modes that don't use one."""
+
+        return self._substates
+
+    @property
+    def current_substate(self) -> ModeSubState | None:
+        """Active :class:`ModeSubState` if this mode runs a sub-FSM."""
+
+        if self._substates is None:
+            return None
+        return self._substates.current
+
+    def add_substate_listener(self, listener: SubStateListener) -> None:
+        """Subscribe to substate swaps. No-op if the mode has no sub-FSM.
+
+        The UI loop wires its face renderer through this so the screen
+        flips to ``happy`` / ``worried`` / etc. the instant a substate
+        moves, without waiting for the next AppState transition.
+        """
+
+        if self._substates is None:
+            return
+        self._substates.add_listener(listener)
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -43,7 +43,6 @@ from app.services.gemma import (
 from app.state import AppState
 from app.system_state import SystemState
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------

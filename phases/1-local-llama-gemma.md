@@ -1,1 +1,0 @@
-Refer to `gemma-llama/specification.md`.

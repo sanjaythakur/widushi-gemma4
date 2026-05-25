@@ -145,7 +145,34 @@ class Orchestrator:
     async def _dispatch(self, event: Event) -> None:
         # CANCEL is a wildcard: from any state, drop back to IDLE, cancel
         # the active mode (if any), and abandon any pending side effect.
+        #
+        # The one carve-out: an active Mode may intercept CANCEL via
+        # ``handle_event`` (e.g. VoiceMirrorMode converts a silence
+        # CANCEL into a CalmAndRetry side effect that stays in SESSION).
+        # We only honour the intercept if the mode returns a Transition;
+        # any other CANCEL still drops the session.
         if event.type is EventType.CANCEL:
+            intercept: Transition | None = None
+            if self._active_mode is not None:
+                try:
+                    intercept = self._active_mode.handle_event(self, event)
+                except Exception:
+                    log.exception(
+                        "mode %s.handle_event raised on CANCEL; using default path",
+                        self._active_mode.name,
+                    )
+                    intercept = None
+
+            if intercept is not None:
+                # Mode wants to handle this CANCEL itself. Run its
+                # transition + side effect just like a normal table hit;
+                # crucially, do NOT drop SystemState.SESSION.
+                await self._cancel_side_effects()
+                await self._transition(
+                    intercept.target, event, intercept.side_effect
+                )
+                return
+
             await self._cancel_side_effects()
             if self._active_mode is not None:
                 await self._exit_active_mode()
